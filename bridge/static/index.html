@@ -283,6 +283,7 @@ function renderStatus(s) {
         h("span", { class: "chip " + (amp.connected ? "ok" : "bad") }, amp.connected ? "online" : "offline"),
         h("span", { class: "meta" }, `${amp.id} · ${amp.host}:${amp.port} · ${last}${amp.failures ? ` · ${amp.failures} failed polls` : ""}`)),
       h("div", { class: "zones" }));
+    if (amp.reset && amp.reset.suspected) sec.insertBefore(resetBanner(amp), $(".zones", sec));
     const grid = $(".zones", sec);
     for (const z of amp.zones) {
       const key = `${amp.id}:${z.n}`;
@@ -295,6 +296,27 @@ function renderStatus(s) {
   }
   wrap.replaceChildren(frag);
   renderMatrices(s.matrices || []);
+}
+
+function resetBanner(amp) {
+  const r = amp.reset, before = r.before || {};
+  const fmtTone = v => (v > 0 ? "+" : "") + v;
+  const label = n => amp.source_options[n - 1] || n;
+  const rows = amp.zones.map(z => {
+    const b = before[String(z.n)];
+    return h("tr", {}, h("td", {}, `${z.n} · ${z.name}`),
+      b ? [h("td", {}, label(b[0])), h("td", {}, 75 - b[1]), h("td", {}, fmtTone(b[2])), h("td", {}, fmtTone(b[3]))]
+        : h("td", { colspan: 4, class: "hint" }, "no saved settings"));
+  });
+  return h("div", { class: "banner bad", style: "margin-bottom:10px" },
+    h("strong", {}, "Factory reset suspected"),
+    ` – since ${r.since ? new Date(r.since * 1000).toLocaleString() : "?"}. All zones now show identical, flat settings. Nothing was sent to the amp.`,
+    h("details", { style: "margin-top:8px" }, h("summary", { style: "cursor:pointer" }, "Settings before the reset"),
+      h("table", { style: "margin-top:6px" }, h("thead", {}, h("tr", {}, ["Zone", "Source", "Volume", "Bass", "Treble"].map(t => h("th", {}, t)))),
+        h("tbody", {}, rows))),
+    h("div", { style: "margin-top:8px" }, h("button", { class: "btn", onclick: async () => {
+      if (!confirm(`Dismiss the warning for ${amp.name}? Current settings become the new baseline.`)) return;
+      await api("/api/reset_ack", { amp: amp.id }); pollStatus(); } }, "Dismiss – settings are fine")));
 }
 
 function renderMatrices(list) {
@@ -423,6 +445,7 @@ function renderForm() {
   const lvl = h("select", { onchange: e => { f.log_level = e.target.value; markDirty(); } },
     ["DEBUG", "INFO", "WARNING", "ERROR"].map(l => h("option", { selected: l === f.log_level }, l)));
   const cleanup = h("input", { type: "checkbox", checked: f.cleanup_orphans, onchange: e => { f.cleanup_orphans = e.target.checked; markDirty(); } });
+  const resetDet = h("input", { type: "checkbox", checked: f.reset_detection_enabled, onchange: e => { f.reset_detection_enabled = e.target.checked; markDirty(); } });
 
   const general = h("div", { class: "card" }, h("h3", {}, "MQTT & bridge"),
     h("div", { class: "grid" },
@@ -437,7 +460,8 @@ function renderForm() {
       field("Log level", lvl),
       field("Web UI port", inp(f, "web_port", { type: "number" })),
       field("Web UI password", webpw),
-      h("label", { class: "field check" }, cleanup, h("span", {}, "Remove orphaned HA entities on startup"))));
+      h("label", { class: "field check" }, cleanup, h("span", {}, "Remove orphaned HA entities on startup")),
+      h("label", { class: "field check" }, resetDet, h("span", {}, "Warn if an amp looks factory-reset"))));
 
   const amps = f.amps.map((a, i) => ampCard(a, i));
   const add = h("button", { class: "btn", onclick: () => {

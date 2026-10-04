@@ -35,6 +35,12 @@ DEFAULTS = {
         "cleanup_orphans": False,
     },
     "logging": {"level": "INFO"},
+    "reset_detection": {
+        "enabled": True,           # warn (never act) when an amp looks factory-reset
+        "min_zones": 8,            # zones that must be flat + identical
+        "min_changed": 3,          # ...of which at least this many changed from last known
+        "confirmation_polls": 2,   # consecutive polls before warning
+    },
     "web": {
         "enabled": True,
         "host": "0.0.0.0",
@@ -173,6 +179,7 @@ class Settings:
     logging: dict
     timing: dict
     web: dict
+    reset_detection: dict
     amps: List[Amp] = field(default_factory=list)
     matrices: List[Matrix] = field(default_factory=list)
 
@@ -370,6 +377,15 @@ def parse(raw: dict, path: str = "<memory>", apply_env: bool = True) -> Settings
     if not 1 <= cfg["web"]["port"] <= 65535:
         raise ConfigError("web.port must be 1-65535")
     cfg["web"]["enabled"] = bool(cfg["web"]["enabled"])
+    rd = cfg["reset_detection"]
+    rd["enabled"] = bool(rd.get("enabled", True))
+    for k, lo, hi in (("min_zones", 1, ZONES_PER_AMP), ("min_changed", 1, ZONES_PER_AMP), ("confirmation_polls", 1, 20)):
+        try:
+            rd[k] = int(rd[k])
+        except (TypeError, ValueError):
+            raise ConfigError(f"reset_detection.{k} must be a whole number")
+        if not lo <= rd[k] <= hi:
+            raise ConfigError(f"reset_detection.{k} must be {lo}-{hi}")
     for k in ("base_topic", "matrix_base_topic", "discovery_prefix"):
         t = str(cfg["mqtt"][k]).strip("/")
         if not t or any(c in t for c in "+#"):
@@ -404,7 +420,7 @@ def parse(raw: dict, path: str = "<memory>", apply_env: bool = True) -> Settings
 
     return Settings(
         path=path, raw=raw, mqtt=cfg["mqtt"], discovery=cfg["discovery"],
-        logging=cfg["logging"], timing=cfg["timing"], web=cfg["web"], amps=amps, matrices=matrices,
+        logging=cfg["logging"], timing=cfg["timing"], web=cfg["web"], reset_detection=cfg["reset_detection"], amps=amps, matrices=matrices,
     )
 
 

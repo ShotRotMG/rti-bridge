@@ -79,6 +79,27 @@ and `.../status`. To route, publish an input label or number to `rti/vhd8x/<id>/
 Firmware tested: 3.5.43-1 (HDBaseT modules 31.47.1). The matrix connects to the RTI/Pulse-Eight cloud
 and can update itself. If routing stops working after an update, check `/Port/List` still answers.
 
+## Factory-reset detection
+
+Upstream saw AD-8x amps come back from power events with every zone at factory defaults.
+This bridge **only warns**; it never sends anything to the amps on its own.
+
+It saves each amp's last known zone settings (source, volume, bass, treble) to `amp_state.json` next to
+config.yaml. A reset is suspected when, for 2 polls in a row:
+- all 8 zones on an amp show flat bass/treble with identical source and volume,
+- they were set differently before,
+- and at least 3 of them changed.
+
+When that happens:
+- the log shows `FACTORY RESET SUSPECTED`
+- the Status page shows a banner with each zone's saved "before" settings
+- Home Assistant's **Factory Reset Suspected** sensor turns on
+
+Dismiss it with the banner button, the **Dismiss Reset Warning** button entity in Home Assistant, or by
+publishing to `rti/ad8x/<amp>/reset/ack`. The current settings then become the new baseline.
+The warning also clears by itself once zones are set up again.
+Turn it off with `reset_detection.enabled: false` or the checkbox on the Config page.
+
 ## Web UI
 
 The bridge serves a page on **port 8088**, for example `http://10.0.0.103:8088/`:

@@ -16,6 +16,7 @@ Version 1.8.2
   2.1.1: from upstream 2.0.x: paced bass/treble (one send, settle, one verify),
          exponential reconnect backoff, staggered amp start, 0.2s command pacing
   2.1.2: advanced timing section in the web config form
+  2.1.3: factory-reset detection (warn only): HA sensor + dismiss button, web banner
 """
 import os
 import sys
@@ -33,6 +34,7 @@ import psutil  # REQUIRED FOR METRICS
 
 import settings as settings_mod
 import vhd8x
+from reset_detect import ResetDetector
 from settings import ConfigError, Settings, slugify, ZONES_PER_AMP
 
 
@@ -65,7 +67,7 @@ class _RingHandler(logging.Handler):
 LOG_BUFFER = _RingHandler()
 LOG_BUFFER.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
 logging.getLogger().addHandler(LOG_BUFFER)
-__version__ = "2.1.2"
+__version__ = "2.1.3"
 
 
 # CONFIG - populated from config.yaml by apply_settings() at startup
@@ -191,9 +193,11 @@ def zone_object_id(amp_key: str, zone: int, suffix: str) -> str:
 
 
 class AmpSession(threading.Thread):
-    def __init__(self, amp_name: str, addr: Tuple[str, int], mqttc: mqtt.Client, start_delay: float = 0.0):
+    def __init__(self, amp_name: str, addr: Tuple[str, int], mqttc: mqtt.Client, start_delay: float = 0.0,
+                 on_full_poll=None):
         super().__init__(daemon=True)
         self.start_delay = start_delay
+        self.on_full_poll = on_full_poll
         self.amp_name = amp_name
         self.addr = addr
         self.mqttc = mqttc
@@ -607,6 +611,11 @@ class AmpSession(threading.Thread):
                     return False
 
                 self._handle_poll_success()
+                if success_count == ZONES_PER_AMP and self.on_full_poll:
+                    try:
+                        self.on_full_poll(self)
+                    except Exception as e:
+                        log.warning(f"[{self.amp_name}] reset check failed: {e}")
                 return True
             except Exception as e:
                 log.warning(f"[{self.amp_name}] major poll error: {e}")
@@ -669,6 +678,9 @@ class Bridge:
         self._scan_lock = threading.Lock()
         self._scanning = False
         self._scan_seen: set = set()
+        self.reset = ResetDetector(
+            os.path.join(os.path.dirname(SETTINGS.path), "amp_state.json"),
+            SETTINGS.reset_detection, self._pub_reset)
 
     def _pub_disc(self, component: str, object_id: str, cfg: dict):
         t = discovery_topic(component, object_id)
@@ -719,6 +731,19 @@ class Bridge:
             amp_key = amp.id
             avail_t = self._topic(amp_key, "status")
             dev = device_block(amp_key)
+            if SETTINGS.reset_detection.get("enabled", True):
+                rid = slugify(f"ad8x_{amp_key}_reset")
+                self._pub_disc("binary_sensor", f"{rid}_suspected", {
+                    "name": "Factory Reset Suspected", "uniq_id": f"{rid}_suspected",
+                    "stat_t": self._topic(amp_key, "reset", "state"), "pl_on": "on", "pl_off": "off",
+                    "json_attr_t": self._topic(amp_key, "reset", "attributes"),
+                    "dev_cla": "problem", "ent_cat": "diagnostic", "device": dev,
+                })
+                self._pub_disc("button", f"{rid}_dismiss", {
+                    "name": "Dismiss Reset Warning", "uniq_id": f"{rid}_dismiss",
+                    "cmd_t": self._topic(amp_key, "reset", "ack"), "pl_prs": "ack",
+                    "ent_cat": "diagnostic", "icon": "mdi:check-circle-outline", "device": dev,
+                })
             for z in range(1, ZONES_PER_AMP + 1):
                 zname = amp.zones[z].name
                 base = self._topic(amp_key, "zone", z)
@@ -889,7 +914,8 @@ class Bridge:
 
         for i, amp in enumerate(SETTINGS.amps):
             name, addr = amp.id, (amp.host, amp.port)
-            s = AmpSession(name, addr, self.client, start_delay=i * AMP_START_STAGGER)
+            s = AmpSession(name, addr, self.client, start_delay=i * AMP_START_STAGGER,
+                           on_full_poll=self._amp_full_poll)
             self.sessions[name] = s
             s.start()
             log.info(f"Started AmpSession {name} -> {addr[0]}:{addr[1]}")
@@ -903,6 +929,7 @@ class Bridge:
     def stop(self):
         for s in self.sessions.values():
             s.stop()
+        self.reset.flush()
         for m in self.matrices.values():
             m.stop()
         self.client.loop_stop()
@@ -913,6 +940,9 @@ class Bridge:
             client.subscribe(f"{self._topic('+', 'zone', '+', 'set', '+')}")
             client.subscribe(f"{self._topic('+', 'raw')}")
             client.subscribe(f"{self._topic('all', 'command')}")
+            client.subscribe(f"{self._topic('+', 'reset', 'ack')}")
+            for amp in SETTINGS.amps:
+                self._pub_reset(amp.id, self.reset.get(amp.id))
             client.subscribe(f"{DISCOVERY_PREFIX}/status")
             if SETTINGS.matrices:
                 client.subscribe(f"{MATRIX_BASE}/+/output/+/set/source")
@@ -924,6 +954,21 @@ class Bridge:
             log.info(f"MQTT connected to {MQTT_HOST}:{MQTT_PORT}")
         else:
             log.error(f"MQTT connect failed code: {rc}")
+
+    # ---- factory-reset detection -----------------------------------------
+    def _pub_reset(self, amp: str, status: dict):
+        self.client.publish(self._topic(amp, "reset", "state"), "on" if status.get("suspected") else "off", retain=True)
+        self.client.publish(self._topic(amp, "reset", "attributes"), json.dumps(status), retain=True)
+
+    def _amp_full_poll(self, sess):
+        self.reset.evaluate(sess.amp_name, dict(sess._zone_states))
+
+    def reset_ack(self, amp: str) -> bool:
+        sess = self.sessions.get(amp)
+        if not sess:
+            return False
+        self.reset.acknowledge(amp, dict(sess._zone_states))
+        return True
 
     # ---- commands (shared by MQTT and the web UI) ---------------------
     def all_off(self):
@@ -1013,6 +1058,7 @@ class Bridge:
                 "failures": sess._consecutive_failures if sess else 0,
                 "last_poll_ok": sess.last_poll_ok if sess else None,
                 "source_options": amp.source_options,
+                "reset": self.reset.get(amp.id),
                 "zones": zones,
             })
         return {
@@ -1057,6 +1103,11 @@ class Bridge:
                 log.info(f"Received master command: {payload}")
                 if payload.upper() == "OFF":
                     self.all_off()
+                return
+
+            if len(parts) == 3 and parts[1:] == ["reset", "ack"]:
+                log.info(f"[{parts[0]}] reset warning dismissed via MQTT")
+                self.reset_ack(parts[0])
                 return
 
             if len(parts) == 2 and parts[1] == "raw":

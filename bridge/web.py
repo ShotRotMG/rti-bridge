@@ -142,6 +142,7 @@ def form_get(path: str) -> dict:
                                           "discovery_prefix")},
         "mqtt_has_password": bool(cfg.mqtt["password"]),
         "cleanup_orphans": bool(cfg.discovery.get("cleanup_orphans")),
+        "reset_detection_enabled": bool(cfg.reset_detection.get("enabled", True)),
         "log_level": str(cfg.logging.get("level", "INFO")).upper(),
         "poll_interval_sec": cfg.timing["poll_interval_sec"],
         # advanced timing: only what the file sets (None = built-in default)
@@ -197,6 +198,8 @@ def form_save(path: str, data: dict) -> None:
 
     if "cleanup_orphans" in data:
         _section(doc, "discovery")["cleanup_orphans"] = bool(data["cleanup_orphans"])
+    if "reset_detection_enabled" in data:
+        _section(doc, "reset_detection")["enabled"] = bool(data["reset_detection_enabled"])
     if "log_level" in data:
         _section(doc, "logging")["level"] = str(data["log_level"]).upper()
     if isinstance(data.get("timing"), dict):
@@ -430,6 +433,11 @@ class _Handler(BaseHTTPRequestHandler):
                 log.info(f"[web] {body.get('matrix')} output {body.get('output')} <- input {body.get('input')}")
                 ok = self.bridge.matrix_route(str(body.get("matrix")), int(body.get("output")), str(body.get("input")))
                 return self._send(200, {"ok": ok})
+            if path == "/api/reset_ack":
+                if self.bridge is None:
+                    return self._send(503, {"ok": False, "error": "bridge not running"})
+                log.info(f"[web] reset warning dismissed for {body.get('amp')}")
+                return self._send(200, {"ok": self.bridge.reset_ack(str(body.get("amp")))})
             if path == "/api/all_off":
                 if self.bridge is None:
                     return self._send(503, {"ok": False, "error": "bridge not running"})

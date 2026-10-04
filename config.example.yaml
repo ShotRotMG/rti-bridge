@@ -19,6 +19,15 @@ discovery:
 logging:
   level: INFO                  # DEBUG also dumps raw telnet bytes
 
+# Warn (never act) if an amp looks like it reset to factory defaults - every zone
+# suddenly flat and identical when they were set differently before. Last known
+# settings are saved to amp_state.json next to this file.
+reset_detection:
+  enabled: true
+  # min_zones: 8            # zones that must be flat + identical
+  # min_changed: 3          # ...and at least this many changed from last known
+  # confirmation_polls: 2
+
 web:
   enabled: true
   port: 8088                   # http://<docker-host>:8088/
