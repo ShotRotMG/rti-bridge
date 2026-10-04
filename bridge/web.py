@@ -22,7 +22,8 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 import settings as settings_mod
-from settings import ConfigError, ZONES_PER_AMP, SOURCES_PER_AMP, legacy_slug
+from settings import (ConfigError, ZONES_PER_AMP, SOURCES_PER_AMP, MATRIX_INPUTS, MATRIX_OUTPUTS,
+                      legacy_slug)
 
 log = logging.getLogger("rti_web")
 
@@ -137,7 +138,8 @@ def form_get(path: str) -> dict:
     plain = json.loads(json.dumps(doc, default=str))
     cfg = settings_mod.parse(plain, path, apply_env=False)
     return {
-        "mqtt": {k: cfg.mqtt[k] for k in ("host", "port", "user", "base_topic", "discovery_prefix")},
+        "mqtt": {k: cfg.mqtt[k] for k in ("host", "port", "user", "base_topic", "matrix_base_topic",
+                                          "discovery_prefix")},
         "mqtt_has_password": bool(cfg.mqtt["password"]),
         "cleanup_orphans": bool(cfg.discovery.get("cleanup_orphans")),
         "log_level": str(cfg.logging.get("level", "INFO")).upper(),
@@ -150,6 +152,15 @@ def form_get(path: str) -> dict:
             "zones": {str(n): {"name": z.name, "id": z.id} for n, z in a.zones.items()},
             "sources": {str(n): a.sources.get(n, "") for n in range(1, SOURCES_PER_AMP + 1)},
         } for a in cfg.amps],
+        "matrices": [{
+            "id": m.id, "name": m.name, "host": m.host, "port": m.port,
+            "poll_interval_sec": m.poll_interval_sec,
+            "inputs": {str(n): m.inputs.get(n, "") for n in range(1, MATRIX_INPUTS + 1)},
+            "outputs": {str(n): {"exposed": n in m.outputs,
+                                 "name": m.outputs[n].name if n in m.outputs else f"Output {n}",
+                                 "id": m.outputs[n].id if n in m.outputs else ""}
+                        for n in range(1, MATRIX_OUTPUTS + 1)},
+        } for m in cfg.matrices],
     }
 
 
@@ -170,7 +181,7 @@ def form_save(path: str, data: dict) -> None:
     doc = _load_doc(_read_text(path))
 
     mq = _section(doc, "mqtt")
-    for k in ("host", "user", "base_topic", "discovery_prefix"):
+    for k in ("host", "user", "base_topic", "matrix_base_topic", "discovery_prefix"):
         if k in data.get("mqtt", {}):
             mq[k] = str(data["mqtt"][k]).strip()
     if "port" in data.get("mqtt", {}):
@@ -231,6 +242,52 @@ def form_save(path: str, data: dict) -> None:
             _set_or_insert(m, 5, "sources", sources)
             seq.append(m)
         doc["amps"] = seq
+
+    if "matrices" in data and (data["matrices"] or "matrices" in doc):
+        old = {str(m.get("id")): m for m in (doc.get("matrices") or []) if isinstance(m, dict)}
+        seq = CommentedSeq()
+        for d in data["matrices"]:
+            mid = str(d.get("id") or "").strip()
+            m = old.get(mid)
+            if m is None:
+                m = CommentedMap()
+            _set_or_insert(m, 0, "id", mid)
+            name = str(d.get("name") or "").strip()
+            if name:
+                _set_or_insert(m, 1, "name", name)
+            elif "name" in m:
+                del m["name"]
+            _set_or_insert(m, 2, "host", str(d.get("host") or "").strip())
+            port = int(d.get("port") or 80)
+            if port != 80 or "port" in m:
+                _set_or_insert(m, 3, "port", port)
+            v = float(d.get("poll_interval_sec") or 5)
+            _set_or_insert(m, 4, "poll_interval_sec", int(v) if v.is_integer() else v)
+
+            inputs = CommentedMap()
+            for n in range(1, MATRIX_INPUTS + 1):
+                label = str((d.get("inputs") or {}).get(str(n)) or "").strip()
+                if label:
+                    inputs[n] = label
+            if not inputs:
+                inputs.fa.set_flow_style()
+            _set_or_insert(m, 5, "inputs", inputs)
+
+            outputs = CommentedMap()
+            for n in range(1, MATRIX_OUTPUTS + 1):
+                o = (d.get("outputs") or {}).get(str(n)) or {}
+                if not o.get("exposed"):
+                    continue
+                oname = str(o.get("name") or "").strip() or f"Output {n}"
+                oid = str(o.get("id") or "").strip() or legacy_slug(oname)
+                entry = CommentedMap([("name", oname), ("id", oid)])
+                entry.fa.set_flow_style()
+                outputs[n] = entry
+            if not outputs:
+                outputs.fa.set_flow_style()
+            _set_or_insert(m, 6, "outputs", outputs)
+            seq.append(m)
+        doc["matrices"] = seq
 
     _write_validated(path, doc)
 
@@ -339,6 +396,12 @@ class _Handler(BaseHTTPRequestHandler):
                 ok = self.bridge.zone_command(str(body.get("amp")), int(body.get("zone")),
                                               str(body.get("cmd")).lower(), str(body.get("value", "")))
                 log.info(f"[web] {body.get('amp')} zone {body.get('zone')} {body.get('cmd')} <- '{body.get('value', '')}' -> {'ok' if ok else 'rejected'}")
+                return self._send(200, {"ok": ok})
+            if path == "/api/route":
+                if self.bridge is None:
+                    return self._send(503, {"ok": False, "error": "bridge not running"})
+                log.info(f"[web] {body.get('matrix')} output {body.get('output')} <- input {body.get('input')}")
+                ok = self.bridge.matrix_route(str(body.get("matrix")), int(body.get("output")), str(body.get("input")))
                 return self._send(200, {"ok": ok})
             if path == "/api/all_off":
                 if self.bridge is None:

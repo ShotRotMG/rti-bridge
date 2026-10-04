@@ -12,6 +12,7 @@ Version 1.8.2
   1.9.2: compose pull_policy: build so redeploys pick up new commits
   1.9.3: telnet TX logged at DEBUG; one INFO line per incoming command; optional amp names
   2.0.0: web UI (status, zone control, config editor, logs) on port 8088
+  2.1.0: RTI VHD-8x matrix module (HTTP): source select per output, signal/link sensors
 """
 import os
 import sys
@@ -28,6 +29,7 @@ import paho.mqtt.client as mqtt
 import psutil  # REQUIRED FOR METRICS
 
 import settings as settings_mod
+import vhd8x
 from settings import ConfigError, Settings, slugify, ZONES_PER_AMP
 
 
@@ -60,13 +62,14 @@ class _RingHandler(logging.Handler):
 LOG_BUFFER = _RingHandler()
 LOG_BUFFER.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
 logging.getLogger().addHandler(LOG_BUFFER)
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 
 # CONFIG - populated from config.yaml by apply_settings() at startup
 SETTINGS: Optional[Settings] = None
 MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS = "127.0.0.1", 1883, "", ""
 MQTT_BASE, DISCOVERY_PREFIX = "rti/ad8x", "homeassistant"
+MATRIX_BASE = "rti/vhd8x"
 POLL_INTERVAL_SEC = 20.0
 CONNECT_TIMEOUT = 6.0
 PER_CMD_TIMEOUT = 5.0
@@ -82,7 +85,7 @@ ORPHAN_SCAN_SEC = 5.0  # how long to collect retained discovery configs before c
 
 
 def apply_settings(cfg: Settings):
-    global SETTINGS, MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS, MQTT_BASE, DISCOVERY_PREFIX
+    global SETTINGS, MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS, MQTT_BASE, DISCOVERY_PREFIX, MATRIX_BASE
     global POLL_INTERVAL_SEC, CONNECT_TIMEOUT, PER_CMD_TIMEOUT, POST_SEND_SETTLE, INTER_CMD_SLEEP
     global SET_RETRIES, RETRY_SLEEP, DUMP_RAW_CHUNKS, VOL_COALESCE_SEC, VOL_ECHO_SUPPRESS_SEC
     global HEALTH_CHECK_INTERVAL
@@ -90,6 +93,7 @@ def apply_settings(cfg: Settings):
     m, t = cfg.mqtt, cfg.timing
     MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS = m["host"], m["port"], m["user"], m["password"]
     MQTT_BASE, DISCOVERY_PREFIX = m["base_topic"], m["discovery_prefix"]
+    MATRIX_BASE = m["matrix_base_topic"]
     POLL_INTERVAL_SEC = t["poll_interval_sec"]
     CONNECT_TIMEOUT = t["connect_timeout_sec"]
     PER_CMD_TIMEOUT = t["per_cmd_timeout_sec"]
@@ -611,6 +615,8 @@ class Bridge:
         self._process = psutil.Process(self._pid)
         self._last_diag_pub_time = time.monotonic()
         self._published_disc: set = set()
+        self.matrices: dict = {}
+        self._disc_lock = threading.Lock()
         self._scan_lock = threading.Lock()
         self._scanning = False
         self._scan_seen: set = set()
@@ -620,8 +626,46 @@ class Bridge:
         self._published_disc.add(t)
         self.client.publish(t, json.dumps(cfg), retain=True)
 
+    def _publish_matrix_discovery(self, sess):
+        m = sess.cfg
+        dev = {"identifiers": [f"vhd8x_{m.id}"], "manufacturer": "RTI", "model": "VHD-8x",
+               "name": m.device_name, "configuration_url": f"http://{m.host}/index.htm"}
+        avail = sess.topic("status")
+        labels = sess.labels
+        options = [labels[n] for n in sorted(labels)]
+        with self._disc_lock:
+            for n, out in m.outputs.items():
+                oid = slugify(f"vhd8x_{m.id}_{out.id}")
+                self._pub_disc("select", f"{oid}_source", {
+                    "name": f"{out.name} Source", "uniq_id": f"{oid}_source",
+                    "stat_t": sess.topic("output", n, "source"),
+                    "cmd_t": sess.topic("output", n, "set", "source"),
+                    "options": options, "avty_t": avail, "device": dev, "icon": "mdi:video-input-hdmi",
+                })
+                self._pub_disc("binary_sensor", f"{oid}_link", {
+                    "name": f"{out.name} Link", "uniq_id": f"{oid}_link",
+                    "stat_t": sess.topic("output", n, "link"), "pl_on": "on", "pl_off": "off",
+                    "dev_cla": "connectivity", "ent_cat": "diagnostic", "avty_t": avail, "device": dev,
+                })
+            for n in range(1, settings_mod.MATRIX_INPUTS + 1):
+                iid = slugify(f"vhd8x_{m.id}_input_{n}")
+                self._pub_disc("binary_sensor", f"{iid}_signal", {
+                    "name": f"{labels[n]} Signal", "uniq_id": f"{iid}_signal",
+                    "stat_t": sess.topic("input", n, "signal"), "pl_on": "on", "pl_off": "off",
+                    "icon": "mdi:video-input-hdmi", "avty_t": avail, "device": dev,
+                })
+
+    def _matrix_labels_changed(self, sess):
+        log.info(f"[{sess.cfg.id}] input names from matrix: "
+                 + ", ".join(f"{n}={l}" for n, l in sorted(sess.labels.items())))
+        if self.client.is_connected():
+            self._publish_matrix_discovery(sess)
+            sess.republish()
+
     def publish_discovery(self):
         self._published_disc = set()
+        for sess in self.matrices.values():
+            self._publish_matrix_discovery(sess)
         for amp in SETTINGS.amps:
             amp_key = amp.id
             avail_t = self._topic(amp_key, "status")
@@ -744,7 +788,7 @@ class Bridge:
         ids = dev.get("identifiers") or dev.get("ids") or []
         if isinstance(ids, str):
             ids = [ids]
-        if any(str(i).startswith("ad8x_") for i in ids):
+        if any(str(i).startswith(("ad8x_", "vhd8x_")) for i in ids):
             with self._scan_lock:
                 self._scan_seen.add(topic)
 
@@ -801,9 +845,17 @@ class Bridge:
             s.start()
             log.info(f"Started AmpSession {name} -> {addr[0]}:{addr[1]}")
 
+        for m in SETTINGS.matrices:
+            sess = vhd8x.MatrixSession(m, self.client, MATRIX_BASE, self._matrix_labels_changed)
+            self.matrices[m.id] = sess
+            sess.start()
+            log.info(f"Started MatrixSession {m.id} -> http://{m.host}:{m.port} (every {m.poll_interval_sec:g}s)")
+
     def stop(self):
         for s in self.sessions.values():
             s.stop()
+        for m in self.matrices.values():
+            m.stop()
         self.client.loop_stop()
         self.client.disconnect()
 
@@ -813,8 +865,12 @@ class Bridge:
             client.subscribe(f"{self._topic('+', 'raw')}")
             client.subscribe(f"{self._topic('all', 'command')}")
             client.subscribe(f"{DISCOVERY_PREFIX}/status")
+            if SETTINGS.matrices:
+                client.subscribe(f"{MATRIX_BASE}/+/output/+/set/source")
             client.publish(self._topic("bridge", "status"), "online", retain=True)
             self.publish_discovery()
+            for sess in self.matrices.values():
+                sess.republish()
             self._start_orphan_scan()
             log.info(f"MQTT connected to {MQTT_HOST}:{MQTT_PORT}")
         else:
@@ -883,6 +939,10 @@ class Bridge:
             log.warning(f"[{amp}] Bad value '{payload}' for {cmd} on zone {zone}")
         return False
 
+    def matrix_route(self, matrix_id: str, output_n: int, input_value: str) -> bool:
+        sess = self.matrices.get(matrix_id)
+        return bool(sess and sess.route(int(output_n), str(input_value)))
+
     def snapshot(self) -> dict:
         """Current state for the web UI."""
         amps = []
@@ -913,6 +973,7 @@ class Bridge:
             "mqtt": {"host": MQTT_HOST, "port": MQTT_PORT, "connected": self.client.is_connected()},
             "poll_interval_sec": POLL_INTERVAL_SEC,
             "amps": amps,
+            "matrices": [self.matrices[m.id].snapshot() for m in SETTINGS.matrices if m.id in self.matrices],
         }
 
     def on_message(self, client, userdata, msg):
@@ -927,6 +988,15 @@ class Bridge:
             if topic == f"{DISCOVERY_PREFIX}/status":
                 if payload == "online":
                     self.publish_discovery()
+                return
+
+            if topic.startswith(MATRIX_BASE + "/"):
+                parts = topic[len(MATRIX_BASE) + 1:].split("/")
+                # <matrix>/output/<n>/set/source
+                if len(parts) == 5 and parts[1] == "output" and parts[3:] == ["set", "source"]:
+                    log.info(f"[{parts[0]}] output {parts[2]} source <- '{payload}'")
+                    threading.Thread(target=self.matrix_route, args=(parts[0], int(parts[2]), payload),
+                                     daemon=True).start()
                 return
 
             if not topic.startswith(MQTT_BASE + "/"):

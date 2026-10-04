@@ -5,7 +5,7 @@ Home Assistant bridge for RTI AV hardware, so it can be driven without the RTI X
 | Device | What it is | Transport | Status |
 |---|---|---|---|
 | **AD-8x** (x2) | 8-zone audio amplifier, 16 zones total | Telnet (port 23) → MQTT discovery | Working |
-| **VHD-8x** | 8x10 HDBaseT video matrix | HTTP API → MQTT discovery | Planned (v2.1.0) |
+| **VHD-8x** | 8x10 HDBaseT video matrix (Pulse-Eight OEM) | HTTP API → MQTT discovery | Working |
 
 Fork of [srhunt-cyber/RTI-AD8x-Home-Assistant-bridge](https://github.com/srhunt-cyber/RTI-AD8x-Home-Assistant-bridge) (MIT),
 with stability fixes: continue-on-zone-failure, poll reconnect, and no credentials in source.
@@ -13,7 +13,7 @@ with stability fixes: continue-on-zone-failure, poll reconnect, and no credentia
 ## Layout
 
 ```
-bridge/                       Python bridge (rti_ad8x_bridge.py, settings.py, web.py, static/) + mqtt_test.py
+bridge/                       Python bridge (rti_ad8x_bridge.py, vhd8x.py, settings.py, web.py, static/) + mqtt_test.py
 config.example.yaml           copy to config/config.yaml
 Dockerfile, docker-compose.yml container build (see Deploy)
 deploy/systemd/               systemd unit, if you run it outside Docker
@@ -53,10 +53,31 @@ Environment variables override the file. Use them to keep the password out of `c
 | Variable | Overrides |
 |---|---|
 | `MQTT_HOST`, `MQTT_PORT`, `MQTT_USER`, `MQTT_PASS` | `mqtt.*` (no quotes around values) |
-| `MQTT_BASE`, `DISCOVERY_PREFIX` | `mqtt.base_topic`, `mqtt.discovery_prefix` |
+| `MQTT_BASE`, `MQTT_MATRIX_BASE`, `DISCOVERY_PREFIX` | `mqtt.base_topic`, `mqtt.matrix_base_topic`, `mqtt.discovery_prefix` |
 | `LOG_LEVEL` | `logging.level` (`DEBUG` shows every telnet command) |
 | `WEB_PORT`, `WEB_PASSWORD` | `web.port`, `web.password` |
 | `CONFIG_PATH` | location of config.yaml |
+
+## VHD-8x matrix
+
+Add a `matrices:` entry, either in config.yaml or with **+ Add VHD-8x matrix** on the Config page.
+The bridge polls `GET /Port/List` (every 5s by default) and routes with `GET /Port/Set/{in}/{out}`.
+That's the matrix's own unauthenticated web API, so no RTI driver is needed.
+
+Home Assistant gets one device per matrix, with:
+- a **source select** per listed output; the options are the input labels
+- a **signal** binary sensor per input (the matrix sees video on that input)
+- a **link** binary sensor per listed output (the HDBaseT link to the display or receiver is up;
+  this doesn't mean there's picture)
+
+Input labels come from `inputs:` in the config, or else the names set on the matrix itself.
+The web UI's Status tab shows a click-to-route grid of all 10 outputs.
+
+MQTT: state is under `rti/vhd8x/<id>/output/<n>/{source,source_number,link}`, `.../input/<n>/signal`
+and `.../status`. To route, publish an input label or number to `rti/vhd8x/<id>/output/<n>/set/source`.
+
+Firmware tested: 3.5.43-1 (HDBaseT modules 31.47.1). The matrix connects to the RTI/Pulse-Eight cloud
+and can update itself. If routing stops working after an update, check `/Port/List` still answers.
 
 ## Web UI
 

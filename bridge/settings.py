@@ -16,6 +16,8 @@ import yaml
 
 ZONES_PER_AMP = 8
 SOURCES_PER_AMP = 8
+MATRIX_INPUTS = 8      # VHD-8x: 8 inputs, 10 outputs (numbered 1-based like its web UI)
+MATRIX_OUTPUTS = 10
 
 DEFAULTS = {
     "mqtt": {
@@ -24,6 +26,7 @@ DEFAULTS = {
         "user": "",
         "password": "",
         "base_topic": "rti/ad8x",
+        "matrix_base_topic": "rti/vhd8x",
         "discovery_prefix": "homeassistant",
     },
     "discovery": {
@@ -52,6 +55,7 @@ DEFAULTS = {
         "dump_raw_chunks": True,
     },
     "amps": [],
+    "matrices": [],
 }
 
 ENV_OVERRIDES = {
@@ -60,6 +64,7 @@ ENV_OVERRIDES = {
     "MQTT_USER": ("mqtt", "user", str),
     "MQTT_PASS": ("mqtt", "password", str),
     "MQTT_BASE": ("mqtt", "base_topic", str),
+    "MQTT_MATRIX_BASE": ("mqtt", "matrix_base_topic", str),
     "DISCOVERY_PREFIX": ("mqtt", "discovery_prefix", str),
     "LOG_LEVEL": ("logging", "level", str),
     "WEB_PORT": ("web", "port", int),
@@ -121,6 +126,41 @@ class Amp:
 
 
 @dataclass
+class Output:
+    number: int
+    name: str
+    id: str
+
+
+@dataclass
+class Matrix:
+    id: str
+    host: str
+    port: int
+    poll_interval_sec: float
+    inputs: Dict[int, str]         # configured labels only; see input_labels()
+    outputs: Dict[int, Output]     # outputs exposed to HA (all 10 if none configured)
+    name: str = ""
+
+    @property
+    def device_name(self) -> str:
+        return self.name or f"RTI VHD-8x ({self.id})"
+
+    def input_labels(self, device_names: Optional[Dict[int, str]] = None) -> Dict[int, str]:
+        """Label per input: config name, else the matrix's own name, else "Input N".
+        Made unique so they work as select options."""
+        device_names = device_names or {}
+        labels, seen = {}, set()
+        for n in range(1, MATRIX_INPUTS + 1):
+            lbl = self.inputs.get(n) or (device_names.get(n) or "").strip() or f"Input {n}"
+            if lbl in seen:
+                lbl = f"{lbl} ({n})"
+            seen.add(lbl)
+            labels[n] = lbl
+        return labels
+
+
+@dataclass
 class Settings:
     path: str
     raw: dict
@@ -130,9 +170,13 @@ class Settings:
     timing: dict
     web: dict
     amps: List[Amp] = field(default_factory=list)
+    matrices: List[Matrix] = field(default_factory=list)
 
     def amp(self, amp_id: str) -> Optional[Amp]:
         return next((a for a in self.amps if a.id == amp_id), None)
+
+    def matrix(self, matrix_id: str) -> Optional[Matrix]:
+        return next((m for m in self.matrices if m.id == matrix_id), None)
 
 
 def _merge(base: dict, over: dict) -> dict:
@@ -223,6 +267,73 @@ def _parse_sources(amp_id: str, raw) -> Dict[int, str]:
     return out
 
 
+def _parse_matrices(raw, amp_ids) -> List[Matrix]:
+    if not isinstance(raw, list):
+        raise ConfigError("matrices must be a list")
+    out: List[Matrix] = []
+    for i, m in enumerate(raw):
+        if not isinstance(m, dict):
+            raise ConfigError(f"matrices[{i}] must be a mapping")
+        mid = str(m.get("id") or ("matrix" if i == 0 else f"matrix{i + 1}"))
+        if not _ID_RE.match(mid):
+            raise ConfigError(f"matrices[{i}].id '{mid}' may only use a-z, 0-9 and _")
+        if any(x.id == mid for x in out):
+            raise ConfigError(f"matrices: duplicate id '{mid}'")
+        host = str(m.get("host") or "").strip()
+        if not host:
+            raise ConfigError(f"matrices.{mid}.host is required")
+        try:
+            port = int(m.get("port", 80))
+            poll = float(m.get("poll_interval_sec", 5))
+        except (TypeError, ValueError):
+            raise ConfigError(f"matrices.{mid}: port and poll_interval_sec must be numbers")
+        if poll < 1:
+            raise ConfigError(f"matrices.{mid}.poll_interval_sec must be at least 1")
+
+        inputs: Dict[int, str] = {}
+        rin = m.get("inputs") or {}
+        if not isinstance(rin, dict):
+            raise ConfigError(f"matrices.{mid}.inputs must be a mapping of input number -> name")
+        for k, v in rin.items():
+            try:
+                n = int(k)
+            except (TypeError, ValueError):
+                raise ConfigError(f"matrices.{mid}.inputs: '{k}' is not an input number")
+            if not 1 <= n <= MATRIX_INPUTS:
+                raise ConfigError(f"matrices.{mid}.inputs: input numbers must be 1-{MATRIX_INPUTS}, got {n}")
+            if v is not None and str(v).strip():
+                inputs[n] = str(v).strip()
+
+        rout = m.get("outputs") or {}
+        if not isinstance(rout, dict):
+            raise ConfigError(f"matrices.{mid}.outputs must be a mapping of output number -> name")
+        outputs: Dict[int, Output] = {}
+        try:
+            numbers = sorted(int(k) for k in rout) if rout else list(range(1, MATRIX_OUTPUTS + 1))
+        except (TypeError, ValueError):
+            raise ConfigError(f"matrices.{mid}.outputs: keys must be output numbers 1-{MATRIX_OUTPUTS}")
+        seen_ids = {}
+        for n in numbers:
+            if not 1 <= n <= MATRIX_OUTPUTS:
+                raise ConfigError(f"matrices.{mid}.outputs: output numbers must be 1-{MATRIX_OUTPUTS}, got {n}")
+            entry = rout.get(n, rout.get(str(n))) if rout else None
+            if entry is None or isinstance(entry, str):
+                name, oid = (entry or f"Output {n}"), None
+            elif isinstance(entry, dict):
+                name, oid = str(entry.get("name") or f"Output {n}"), entry.get("id")
+            else:
+                raise ConfigError(f"matrices.{mid}.outputs.{n}: expected a name or {{name, id}}")
+            oid = str(oid) if oid else legacy_slug(name)
+            if not _ID_RE.match(oid):
+                raise ConfigError(f"matrices.{mid}.outputs.{n}.id '{oid}' may only use a-z, 0-9 and _")
+            if oid in seen_ids:
+                raise ConfigError(f"matrices.{mid}: outputs {seen_ids[oid]} and {n} share id '{oid}'")
+            seen_ids[oid] = n
+            outputs[n] = Output(n, name, oid)
+        out.append(Matrix(mid, host, port, poll, inputs, outputs, str(m.get("name") or "").strip()))
+    return out
+
+
 def parse(raw: dict, path: str = "<memory>", apply_env: bool = True) -> Settings:
     if raw is None:
         raw = {}
@@ -255,7 +366,7 @@ def parse(raw: dict, path: str = "<memory>", apply_env: bool = True) -> Settings
     if not 1 <= cfg["web"]["port"] <= 65535:
         raise ConfigError("web.port must be 1-65535")
     cfg["web"]["enabled"] = bool(cfg["web"]["enabled"])
-    for k in ("base_topic", "discovery_prefix"):
+    for k in ("base_topic", "matrix_base_topic", "discovery_prefix"):
         t = str(cfg["mqtt"][k]).strip("/")
         if not t or any(c in t for c in "+#"):
             raise ConfigError(f"mqtt.{k} '{t}' is not a valid topic prefix")
@@ -283,9 +394,13 @@ def parse(raw: dict, path: str = "<memory>", apply_env: bool = True) -> Settings
         amps.append(Amp(amp_id, host, port, _parse_zones(amp_id, a.get("zones")),
                         _parse_sources(amp_id, a.get("sources")), str(a.get("name") or "").strip()))
 
+    matrices = _parse_matrices(cfg.get("matrices") or [], {a.id for a in amps})
+    if matrices and cfg["mqtt"]["matrix_base_topic"] == cfg["mqtt"]["base_topic"]:
+        raise ConfigError("mqtt.matrix_base_topic must differ from mqtt.base_topic")
+
     return Settings(
         path=path, raw=raw, mqtt=cfg["mqtt"], discovery=cfg["discovery"],
-        logging=cfg["logging"], timing=cfg["timing"], web=cfg["web"], amps=amps,
+        logging=cfg["logging"], timing=cfg["timing"], web=cfg["web"], amps=amps, matrices=matrices,
     )
 
 

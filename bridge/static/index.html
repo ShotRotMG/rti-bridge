@@ -68,6 +68,21 @@ main { max-width: 1280px; margin: 0 auto; padding: 16px; }
 .zone.disabled .needs-power { opacity: .4; pointer-events: none; }
 .unknown { color: var(--muted); font-size: 12px; }
 
+/* matrix */
+.mx-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+table.mx { border-collapse: separate; border-spacing: 0; min-width: 640px; }
+table.mx th, table.mx td { border-bottom: 1px solid var(--line); padding: 6px; text-align: center; }
+table.mx th.out, table.mx td.out { text-align: left; white-space: nowrap; position: sticky; left: 0; background: var(--panel); }
+table.mx thead th { font-size: 12px; color: var(--text); font-weight: 500; vertical-align: bottom; }
+table.mx thead th small, table.mx td.out small { display: block; color: var(--muted); font-weight: 400; font-size: 11px; }
+table.mx tr.hidden-out td { opacity: .55; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--off); margin-right: 6px; vertical-align: middle; }
+.dot.on { background: var(--ok); }
+.cell { width: 34px; height: 28px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel2); cursor: pointer; }
+.cell:hover { border-color: var(--accent); }
+.cell.sel { background: var(--accent); border-color: var(--accent); }
+.legend { color: var(--muted); font-size: 12px; margin-top: 8px; }
+
 /* config */
 .seg { display: inline-flex; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 2px; margin-bottom: 14px; }
 .seg button { border: 0; background: none; padding: 5px 12px; border-radius: 6px; cursor: pointer; color: var(--muted); }
@@ -127,6 +142,7 @@ pre.logs { background: var(--panel); border: 1px solid var(--line); border-radiu
       <span class="hint" id="pollinfo"></span>
     </div>
     <div id="amps"></div>
+    <div id="matrices"></div>
   </section>
 
   <section id="tab-config" class="hidden">
@@ -211,6 +227,8 @@ function renderChips(s) {
   c.append(h("span", { class: "chip " + (s.mqtt.connected ? "ok" : "bad") }, `MQTT ${s.mqtt.connected ? "connected" : "disconnected"}`));
   const on = s.amps.filter(a => a.connected).length;
   c.append(h("span", { class: "chip " + (on === s.amps.length ? "ok" : on ? "warn" : "bad") }, `${on}/${s.amps.length} amps online`));
+  for (const m of s.matrices || [])
+    c.append(h("span", { class: "chip " + (m.connected ? "ok" : "bad") }, `${m.id} ${m.connected ? "online" : "offline"}`));
   c.append(h("span", { class: "chip" }, `up ${fmtDur(s.uptime_s)}`));
 }
 
@@ -276,6 +294,36 @@ function renderStatus(s) {
     frag.append(sec);
   }
   wrap.replaceChildren(frag);
+  renderMatrices(s.matrices || []);
+}
+
+function renderMatrices(list) {
+  const wrap = $("#matrices");
+  wrap.replaceChildren(...list.map(m => {
+    const last = m.last_poll_ok ? `last poll ${fmtDur(Date.now()/1000 - m.last_poll_ok)} ago` : "no successful poll yet";
+    const head = h("tr", {}, h("th", { class: "out" }, "Output \\ Input"),
+      m.inputs.map(i => h("th", { title: `${i.status_text}${i.device_name ? " · matrix name: " + i.device_name : ""}` },
+        h("span", { class: "dot" + (i.status === 0 || i.status === 2 ? " on" : "") }), i.n, h("small", {}, i.label))));
+    const rows = m.outputs.map(o => h("tr", { class: o.exposed ? "" : "hidden-out" },
+      h("td", { class: "out", title: o.device_name ? `display reports: ${o.device_name}` : "" },
+        h("span", { class: "dot" + (o.status === 0 || o.status === 2 ? " on" : "") }), `${o.n} · ${o.name}`,
+        h("small", {}, o.exposed ? (o.device_name || "") : "not in Home Assistant")),
+      m.inputs.map(i => h("td", {}, h("button", {
+        class: "cell" + (o.source === i.n ? " sel" : ""), title: `${i.label} → ${o.name}`,
+        "aria-label": `Route ${i.label} to ${o.name}`,
+        onclick: async () => {
+          hold("mx:" + m.id, 2500);
+          try { const r = await api("/api/route", { matrix: m.id, output: o.n, input: String(i.n) });
+            if (!r.ok) flash(`Matrix rejected ${i.label} → ${o.name}`, "bad"); } catch (e) { flash("Route failed: " + e.message, "bad"); }
+          pollStatus();
+        } })))));
+    return h("section", { class: "amp" },
+      h("div", { class: "amp-head" }, h("h2", {}, m.name),
+        h("span", { class: "chip " + (m.connected ? "ok" : "bad") }, m.connected ? "online" : "offline"),
+        h("span", { class: "meta" }, `${m.id} · ${m.host} · every ${m.poll_interval_sec}s · ${last}${m.failures ? ` · ${m.failures} failed polls` : ""}`)),
+      h("div", { class: "mx-wrap" }, h("table", { class: "mx" }, h("thead", {}, head), h("tbody", {}, rows))),
+      h("div", { class: "legend" }, "Green dot on an input = signal present. Green dot on an output = HDBaseT link up (display/receiver connected), not picture."));
+  }));
 }
 
 let bridgeWasDown = false;
@@ -383,6 +431,7 @@ function renderForm() {
       field("Username", inp(f.mqtt, "user")),
       field("Password", pw),
       field("Base topic", inp(f.mqtt, "base_topic"), "changing this moves every topic"),
+      field("Matrix base topic", inp(f.mqtt, "matrix_base_topic"), "VHD-8x topics"),
       field("Discovery prefix", inp(f.mqtt, "discovery_prefix")),
       field("Poll interval (s)", inp(f, "poll_interval_sec", { type: "number", min: 2, step: 1 })),
       field("Log level", lvl),
@@ -400,7 +449,57 @@ function renderForm() {
     markDirty(); renderForm();
   } }, "+ Add amp");
 
-  root.replaceChildren(...[envNote, general, ...amps, add].filter(Boolean));
+  f._newmx = f._newmx || new Set();
+  const mxs = f.matrices.map((m, i) => matrixCard(m, i));
+  const addMx = h("button", { class: "btn", onclick: () => {
+    let id = f.matrices.length ? "matrix" + (f.matrices.length + 1) : "matrix";
+    while (f.matrices.some(m => m.id === id)) id += "_";
+    const inputs = {}, outputs = {};
+    for (let n = 1; n <= 8; n++) inputs[n] = "";
+    for (let n = 1; n <= 10; n++) outputs[n] = { exposed: false, name: `Output ${n}`, id: "" };
+    f.matrices.push({ id, name: "", host: "", port: 80, poll_interval_sec: 5, inputs, outputs }); f._newmx.add(id);
+    markDirty(); renderForm();
+  } }, "+ Add VHD-8x matrix");
+
+  root.replaceChildren(...[envNote, general, ...amps, add,
+    h("h3", { style: "margin:22px 0 10px;font-size:15px" }, "Video matrices"), ...mxs, addMx].filter(Boolean));
+}
+
+function matrixCard(m, i) {
+  const f = form, isNew = f._newmx.has(m.id);
+  const live = (status && status.matrices || []).find(x => x.id === m.id);
+  const devIn = n => live ? (live.inputs[n - 1] || {}).device_name : "";
+  const devOut = n => live ? (live.outputs[n - 1] || {}).device_name : "";
+  const inputs = h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Input label (blank = matrix's own name)"))),
+    h("tbody", {}, Object.keys(m.inputs).map(n => h("tr", {}, h("td", { class: "n" }, n),
+      h("td", {}, inp(m.inputs, n, { placeholder: devIn(n) || `Input ${n}` }))))));
+  const outputs = h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "In HA"), h("th", {}, "Output name"), h("th", {}, "Entity id"))),
+    h("tbody", {}, Object.keys(m.outputs).map(n => {
+      const o = m.outputs[n];
+      const wasExposed = !isNew && o.id;
+      return h("tr", {}, h("td", { class: "n" }, n),
+        h("td", { style: "width:44px" }, h("input", { type: "checkbox", checked: o.exposed, style: "width:auto",
+          onchange: e => { o.exposed = e.target.checked; markDirty(); } })),
+        h("td", {}, inp(o, "name", { placeholder: devOut(n) ? `display: ${devOut(n)}` : "" })),
+        h("td", {}, h("input", { value: o.id, readonly: !!wasExposed, placeholder: "from name",
+          title: wasExposed ? "Pinned so renames keep the same HA entity" : "Leave blank to derive from the name",
+          oninput: e => { o.id = e.target.value.trim(); markDirty(); } })));
+    })));
+  return h("div", { class: "card" },
+    h("h3", {}, m.name || m.id, h("span", { class: "spacer" }),
+      h("button", { class: "btn danger", onclick: () => {
+        if (!confirm(`Remove ${m.id}? Its Home Assistant entities will be removed on restart (if orphan cleanup is on).`)) return;
+        f.matrices.splice(i, 1); markDirty(); renderForm(); } }, "Remove matrix")),
+    h("div", { class: "grid" },
+      field("Id", h("input", { value: m.id, readonly: !isNew,
+        oninput: e => { f._newmx.delete(m.id); m.id = e.target.value.trim(); f._newmx.add(m.id); markDirty(); } }),
+        isNew ? "a-z, 0-9, _ – used in topics, can't change later" : "fixed – used in topics and entity ids"),
+      field("Display name", inp(m, "name", { placeholder: `RTI VHD-8x (${m.id})` })),
+      field("Host / IP", inp(m, "host", { placeholder: "192.168.1.x" })),
+      field("HTTP port", inp(m, "port", { type: "number" })),
+      field("Poll interval (s)", inp(m, "poll_interval_sec", { type: "number", min: 1, step: 1 }))),
+    h("div", { class: "two" }, outputs, inputs),
+    h("div", { class: "hint", style: "margin-top:8px" }, "Only ticked outputs get Home Assistant entities. If none are ticked, all 10 do."));
 }
 
 function ampCard(a, i) {
@@ -438,7 +537,7 @@ async function save() {
     let r;
     if (mode === "yaml") r = await api("/api/config/raw", { text: $("#yaml").value });
     else {
-      const body = { ...form }; delete body._new;
+      const body = { ...form }; delete body._new; delete body._newmx;
       if (!body.mqtt_password) delete body.mqtt_password;
       if (!body.web_password) delete body.web_password;
       r = await api("/api/config/form", body);

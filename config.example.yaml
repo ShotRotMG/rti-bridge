@@ -8,6 +8,7 @@ mqtt:
   user: home
   password: ""                 # leave blank and set MQTT_PASS in the container env, or fill in here
   base_topic: rti/ad8x         # changing this moves every state/command topic
+  matrix_base_topic: rti/vhd8x # topics for the VHD-8x matrix
   discovery_prefix: homeassistant
 
 discovery:
@@ -78,3 +79,26 @@ amps:
       7: { name: Courtyard,   id: courtyard }
       8: { name: Stage,       id: stage }
     sources: {}
+
+# RTI VHD-8x video matrix (Pulse-Eight inside), controlled over its HTTP API.
+# Numbers are 1-based, as on the matrix's own web page.
+#
+#   id       used in MQTT topics and entity IDs - don't change once set
+#   inputs   optional labels for inputs 1-8; unlabelled inputs use the matrix's own names
+#   outputs  only listed outputs get Home Assistant entities (none listed = all 10).
+#            {name, id}: the id pins the entity, so set real names BEFORE first start
+#            (or edit the id in the YAML view) - renames later keep the id.
+matrices:
+  - id: matrix
+    # name: Video Matrix
+    host: 192.168.1.114
+    poll_interval_sec: 5
+    inputs: {}
+    #   2: Dish
+    #   4: Cameras
+    #   6: Apple TV
+    outputs:
+      2: { name: Saloon TV A, id: saloon_tv_a }     # matrix reports SAMSUNG
+      3: { name: Saloon TV B, id: saloon_tv_b }     # matrix reports SAMSUNG
+      5: { name: Receiver A,  id: receiver_a }      # matrix reports RX V665
+      6: { name: Receiver B,  id: receiver_b }      # matrix reports RX V665
