@@ -9,6 +9,7 @@ Version 1.8.2
   1.9.0: everything from config.yaml (any number of amps), optional source labels,
          pinned zone ids, orphaned discovery cleanup
   1.9.1: Docker image (dependencies baked in at build time)
+  1.9.2: compose pull_policy: build so redeploys pick up new commits
 """
 import os
 import sys
@@ -36,7 +37,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("rti_ad8x_bridge")
-__version__ = "1.9.1"
+__version__ = "1.9.2"
 
 
 # CONFIG - populated from config.yaml by apply_settings() at startup

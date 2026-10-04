@@ -4,6 +4,7 @@ services:
   rti-bridge:
     build: .
     image: rti-bridge:latest
+    pull_policy: build            # rebuild on every Portainer redeploy instead of reusing the old image
     container_name: rti-bridge
     restart: unless-stopped
     network_mode: host            # amps are on 192.168.1.x, broker on 10.0.0.x
