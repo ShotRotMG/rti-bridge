@@ -13,6 +13,8 @@ Version 1.8.2
   1.9.3: telnet TX logged at DEBUG; one INFO line per incoming command; optional amp names
   2.0.0: web UI (status, zone control, config editor, logs) on port 8088
   2.1.0: RTI VHD-8x matrix module (HTTP): source select per output, signal/link sensors
+  2.1.1: from upstream 2.0.x: paced bass/treble (one send, settle, one verify),
+         exponential reconnect backoff, staggered amp start, 0.2s command pacing
 """
 import os
 import sys
@@ -62,7 +64,7 @@ class _RingHandler(logging.Handler):
 LOG_BUFFER = _RingHandler()
 LOG_BUFFER.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
 logging.getLogger().addHandler(LOG_BUFFER)
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 
 # CONFIG - populated from config.yaml by apply_settings() at startup
@@ -81,6 +83,10 @@ DUMP_RAW_CHUNKS = True
 VOL_COALESCE_SEC = 1.2
 VOL_ECHO_SUPPRESS_SEC = 1.0
 HEALTH_CHECK_INTERVAL = 30.0
+TONE_SETTLE_SEC = 6.0
+RECONNECT_BACKOFF_INITIAL = 5.0
+RECONNECT_BACKOFF_MAX = 30.0
+AMP_START_STAGGER = 1.5
 ORPHAN_SCAN_SEC = 5.0  # how long to collect retained discovery configs before cleanup
 
 
@@ -88,7 +94,8 @@ def apply_settings(cfg: Settings):
     global SETTINGS, MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS, MQTT_BASE, DISCOVERY_PREFIX, MATRIX_BASE
     global POLL_INTERVAL_SEC, CONNECT_TIMEOUT, PER_CMD_TIMEOUT, POST_SEND_SETTLE, INTER_CMD_SLEEP
     global SET_RETRIES, RETRY_SLEEP, DUMP_RAW_CHUNKS, VOL_COALESCE_SEC, VOL_ECHO_SUPPRESS_SEC
-    global HEALTH_CHECK_INTERVAL
+    global HEALTH_CHECK_INTERVAL, TONE_SETTLE_SEC, RECONNECT_BACKOFF_INITIAL, RECONNECT_BACKOFF_MAX
+    global AMP_START_STAGGER
     SETTINGS = cfg
     m, t = cfg.mqtt, cfg.timing
     MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS = m["host"], m["port"], m["user"], m["password"]
@@ -105,6 +112,10 @@ def apply_settings(cfg: Settings):
     VOL_COALESCE_SEC = t["vol_coalesce_sec"]
     VOL_ECHO_SUPPRESS_SEC = t["vol_echo_suppress_sec"]
     HEALTH_CHECK_INTERVAL = t["health_check_interval_sec"]
+    TONE_SETTLE_SEC = t["tone_settle_sec"]
+    RECONNECT_BACKOFF_INITIAL = t["reconnect_backoff_initial_sec"]
+    RECONNECT_BACKOFF_MAX = t["reconnect_backoff_max_sec"]
+    AMP_START_STAGGER = t["amp_start_stagger_sec"]
     logging.getLogger().setLevel(getattr(logging, str(cfg.logging["level"]).upper(), logging.INFO))
 
 
@@ -179,8 +190,9 @@ def zone_object_id(amp_key: str, zone: int, suffix: str) -> str:
 
 
 class AmpSession(threading.Thread):
-    def __init__(self, amp_name: str, addr: Tuple[str, int], mqttc: mqtt.Client):
+    def __init__(self, amp_name: str, addr: Tuple[str, int], mqttc: mqtt.Client, start_delay: float = 0.0):
         super().__init__(daemon=True)
+        self.start_delay = start_delay
         self.amp_name = amp_name
         self.addr = addr
         self.mqttc = mqttc
@@ -316,10 +328,15 @@ class AmpSession(threading.Thread):
         self.mqttc.publish(f"{base}/source", str(sta_data["source"]), retain=True)
         amp_cfg = SETTINGS.amp(self.amp_name)
         self.mqttc.publish(f"{base}/source_label", amp_cfg.source_label(sta_data["source"]), retain=True)
+        buf = self._zone_states.setdefault(z, {})
+        # while a bass/treble change is settling, keep showing the target, not the amp's stale value
+        tone_data = dict(tone_data)
+        for f in ("bass", "treble"):
+            if time.time() < buf.get(f"{f}_hold_until", 0.0) and buf.get(f"target_{f}") is not None:
+                tone_data[f] = buf[f"target_{f}"]
         self.mqttc.publish(f"{base}/bass", str(tone_data["bass"]), retain=True)
         self.mqttc.publish(f"{base}/treble", str(tone_data["treble"]), retain=True)
 
-        buf = self._zone_states.setdefault(z, {})
         if time.time() >= buf.get("suppress_until", 0.0):
             vv = sta_data["vol_0_75"]
             if buf.get("last_published_vol") != vv:
@@ -369,29 +386,34 @@ class AmpSession(threading.Thread):
             return False
         return self._send_and_confirm(zone, f"*ZN{zz(zone)}VOLDN")
 
+    def _tone_now(self, zone: int, field: str) -> int:
+        """Current bass/treble, counting a change that is still pending or settling."""
+        buf = self._zone_states.get(zone, {})
+        pending = (buf.get(f"{field}_timer") and buf[f"{field}_timer"].is_alive()) or \
+            time.time() < buf.get(f"{field}_hold_until", 0.0)
+        if pending and buf.get(f"target_{field}") is not None:
+            return buf[f"target_{field}"]
+        return buf.get(field, 0)
+
     def bass_up(self, zone: int) -> bool:
         if not self._is_zone_on(zone):
             return False
-        cur = self._zone_states.get(zone, {}).get("bass", 0)
-        return self.set_bass(zone, min(12, cur + 2))
+        return self.set_bass(zone, min(12, self._tone_now(zone, "bass") + 2))
 
     def bass_down(self, zone: int) -> bool:
         if not self._is_zone_on(zone):
             return False
-        cur = self._zone_states.get(zone, {}).get("bass", 0)
-        return self.set_bass(zone, max(-12, cur - 2))
+        return self.set_bass(zone, max(-12, self._tone_now(zone, "bass") - 2))
 
     def treble_up(self, zone: int) -> bool:
         if not self._is_zone_on(zone):
             return False
-        cur = self._zone_states.get(zone, {}).get("treble", 0)
-        return self.set_treble(zone, min(12, cur + 2))
+        return self.set_treble(zone, min(12, self._tone_now(zone, "treble") + 2))
 
     def treble_down(self, zone: int) -> bool:
         if not self._is_zone_on(zone):
             return False
-        cur = self._zone_states.get(zone, {}).get("treble", 0)
-        return self.set_treble(zone, max(-12, cur - 2))
+        return self.set_treble(zone, max(-12, self._tone_now(zone, "treble") - 2))
 
     def set_volume(self, zone: int, v: int) -> bool:
         v_clamped = max(0, min(75, int(v)))
@@ -435,18 +457,7 @@ class AmpSession(threading.Thread):
         return True
 
     def _flush_bass(self, zone: int):
-        if not self._is_zone_on(zone):
-            return
-        buf = self._zone_states.get(zone, {})
-        target = buf.get("target_bass")
-        if target is None:
-            return
-        cmd = f"*ZN{zz(zone)}BAS{_encode_tone(target)}"
-        log.info(f"[{self.amp_name}] Coalesced BASS zone {zz(zone)} -> {target}")
-        ok = self._send_and_confirm(zone, cmd)
-        if not ok:
-            log.warning(f"[{self.amp_name}] Coalesced bass SET failed. Re-querying.")
-            self._send_and_confirm(zone, f"*ZN{zz(zone)}STA00")
+        self._flush_tone(zone, "bass")
 
     def set_treble(self, zone: int, level: int) -> bool:
         if not self._is_zone_on(zone):
@@ -464,18 +475,51 @@ class AmpSession(threading.Thread):
         return True
 
     def _flush_treble(self, zone: int):
+        self._flush_tone(zone, "treble")
+
+    def _flush_tone(self, zone: int, field: str):
+        """The AD-8x applies tone changes slowly. Send the absolute target once, show it
+        right away, let the amp settle, then check once - instead of resending."""
         if not self._is_zone_on(zone):
             return
-        buf = self._zone_states.get(zone, {})
-        target = buf.get("target_treble")
+        buf = self._zone_states.setdefault(zone, {})
+        target = buf.get(f"target_{field}")
         if target is None:
             return
-        cmd = f"*ZN{zz(zone)}TRB{_encode_tone(target)}"
-        log.info(f"[{self.amp_name}] Coalesced TREBLE zone {zz(zone)} -> {target}")
-        ok = self._send_and_confirm(zone, cmd)
-        if not ok:
-            log.warning(f"[{self.amp_name}] Coalesced treble SET failed. Re-querying.")
-            self._send_and_confirm(zone, f"*ZN{zz(zone)}STA00")
+        opcode = "BAS" if field == "bass" else "TRB"
+        log.info(f"[{self.amp_name}] {field.upper()} zone {zz(zone)} -> {target} (verify in {TONE_SETTLE_SEC:g}s)")
+        buf[f"{field}_hold_until"] = time.time() + TONE_SETTLE_SEC + 2.0
+        buf[f"{field}_seq"] = seq = buf.get(f"{field}_seq", 0) + 1
+        self.mqttc.publish(self._topic("zone", zone, field), str(target), retain=True)
+        if not self._send_only(f"*ZN{zz(zone)}{opcode}{_encode_tone(target)}"):
+            buf[f"{field}_hold_until"] = 0.0
+            log.warning(f"[{self.amp_name}] {field} send failed for zone {zone}")
+            return
+        threading.Timer(TONE_SETTLE_SEC, self._verify_tone, args=(zone, field, target, seq)).start()
+
+    def _verify_tone(self, zone: int, field: str, target: int, seq: int):
+        buf = self._zone_states.setdefault(zone, {})
+        if buf.get(f"{field}_seq") != seq:
+            return  # a newer change superseded this one; it will verify itself
+        tone = None
+        with self.lock:
+            if self.connected or self._connect():
+                try:
+                    self._send_ascii(f"*ZN{zz(zone)}SET00")
+                    time.sleep(POST_SEND_SETTLE)
+                    tone = parse_tone(self._read_reply(f"${zz(zone)},", PER_CMD_TIMEOUT))
+                except Exception as e:
+                    log.warning(f"[{self.amp_name}] {field} verify failed for zone {zone}: {e}")
+        if buf.get(f"{field}_seq") != seq:
+            return
+        buf[f"{field}_hold_until"] = 0.0
+        if not tone:
+            return  # next poll will publish the real value
+        buf.update(tone)
+        for f in ("bass", "treble"):
+            self.mqttc.publish(self._topic("zone", zone, f), str(tone[f]), retain=True)
+        if tone[field] != target:
+            log.warning(f"[{self.amp_name}] zone {zone} {field}: amp reports {tone[field]}, wanted {target}")
 
     def _send_and_confirm(self, zone: int, cmd_ascii: str) -> bool:
         with self.lock:
@@ -587,16 +631,20 @@ class AmpSession(threading.Thread):
             self._is_down_published = True
 
     def run(self):
+        if self.start_delay and self.stop_flag.wait(self.start_delay):
+            return
         while not self.stop_flag.is_set():
             if self._poll_once():
                 half_interval = POLL_INTERVAL_SEC / 2
-                time.sleep(half_interval)
+                if self.stop_flag.wait(half_interval):
+                    break
                 self._keep_alive()
-                time.sleep(half_interval)
+                self.stop_flag.wait(half_interval)
             else:
-                delay = min(10.0, 2.0 + self._consecutive_failures)
+                n = max(1, self._consecutive_failures)
+                delay = min(RECONNECT_BACKOFF_MAX, RECONNECT_BACKOFF_INITIAL * (2 ** (n - 1)))
                 log.warning(f"[{self.amp_name}] Poll failed, retrying in {delay:.1f}s...")
-                time.sleep(delay)
+                self.stop_flag.wait(delay)
 
     def stop(self):
         self.stop_flag.set()
@@ -838,9 +886,9 @@ class Bridge:
         except Exception as e:
             log.warning(f"[Bridge] Initial psutil call failed: {e}")
 
-        for amp in SETTINGS.amps:
+        for i, amp in enumerate(SETTINGS.amps):
             name, addr = amp.id, (amp.host, amp.port)
-            s = AmpSession(name, addr, self.client)
+            s = AmpSession(name, addr, self.client, start_delay=i * AMP_START_STAGGER)
             self.sessions[name] = s
             s.start()
             log.info(f"Started AmpSession {name} -> {addr[0]}:{addr[1]}")

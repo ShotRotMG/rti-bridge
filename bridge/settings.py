@@ -46,12 +46,16 @@ DEFAULTS = {
         "connect_timeout_sec": 6.0,
         "per_cmd_timeout_sec": 5.0,
         "post_send_settle_sec": 0.1,
-        "inter_cmd_sleep_sec": 0.08,
+        "inter_cmd_sleep_sec": 0.2,
         "set_retries": 2,
         "retry_sleep_sec": 0.2,
         "vol_coalesce_sec": 1.2,
         "vol_echo_suppress_sec": 1.0,
         "health_check_interval_sec": 30.0,
+        "tone_settle_sec": 6.0,              # AD-8x applies bass/treble slowly
+        "reconnect_backoff_initial_sec": 5.0,
+        "reconnect_backoff_max_sec": 30.0,
+        "amp_start_stagger_sec": 1.5,        # don't poll every amp in lockstep
         "dump_raw_chunks": True,
     },
     "amps": [],

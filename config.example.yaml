@@ -29,13 +29,17 @@ timing:
   # connect_timeout_sec: 6
   # per_cmd_timeout_sec: 5
   # post_send_settle_sec: 0.1
-  # inter_cmd_sleep_sec: 0.08
+  # inter_cmd_sleep_sec: 0.2  # gap between telnet commands (was 0.08 before 2.1.1)
   # set_retries: 2
   # retry_sleep_sec: 0.2
   # vol_coalesce_sec: 1.2
   # vol_echo_suppress_sec: 1.0
   # health_check_interval_sec: 30
   # dump_raw_chunks: true
+  # tone_settle_sec: 6           # bass/treble: send once, wait this long, verify once
+  # reconnect_backoff_initial_sec: 5   # then doubles per failure...
+  # reconnect_backoff_max_sec: 30      # ...up to this
+  # amp_start_stagger_sec: 1.5   # offset each amp's polling
 
 # One entry per AD-8x. Add or remove amps freely.
 #

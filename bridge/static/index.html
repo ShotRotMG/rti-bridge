@@ -467,6 +467,10 @@ function renderForm() {
 
 function matrixCard(m, i) {
   const f = form, isNew = f._newmx.has(m.id);
+  const mTitle = h("span", {}, m.name || m.id);
+  const mName = inp(m, "name", { placeholder: `RTI VHD-8x (${m.id})` });
+  const syncM = () => { mTitle.textContent = m.name || m.id; mName.placeholder = `RTI VHD-8x (${m.id})`; };
+  mName.addEventListener("input", syncM);
   const live = (status && status.matrices || []).find(x => x.id === m.id);
   const devIn = n => live ? (live.inputs[n - 1] || {}).device_name : "";
   const devOut = n => live ? (live.outputs[n - 1] || {}).device_name : "";
@@ -486,15 +490,15 @@ function matrixCard(m, i) {
           oninput: e => { o.id = e.target.value.trim(); markDirty(); } })));
     })));
   return h("div", { class: "card" },
-    h("h3", {}, m.name || m.id, h("span", { class: "spacer" }),
+    h("h3", {}, mTitle, h("span", { class: "spacer" }),
       h("button", { class: "btn danger", onclick: () => {
         if (!confirm(`Remove ${m.id}? Its Home Assistant entities will be removed on restart (if orphan cleanup is on).`)) return;
         f.matrices.splice(i, 1); markDirty(); renderForm(); } }, "Remove matrix")),
     h("div", { class: "grid" },
       field("Id", h("input", { value: m.id, readonly: !isNew,
-        oninput: e => { f._newmx.delete(m.id); m.id = e.target.value.trim(); f._newmx.add(m.id); markDirty(); } }),
+        oninput: e => { f._newmx.delete(m.id); m.id = e.target.value.trim(); f._newmx.add(m.id); syncM(); markDirty(); } }),
         isNew ? "a-z, 0-9, _ – used in topics, can't change later" : "fixed – used in topics and entity ids"),
-      field("Display name", inp(m, "name", { placeholder: `RTI VHD-8x (${m.id})` })),
+      field("Display name", mName),
       field("Host / IP", inp(m, "host", { placeholder: "192.168.1.x" })),
       field("HTTP port", inp(m, "port", { type: "number" })),
       field("Poll interval (s)", inp(m, "poll_interval_sec", { type: "number", min: 1, step: 1 }))),
@@ -504,8 +508,12 @@ function matrixCard(m, i) {
 
 function ampCard(a, i) {
   const f = form, isNew = f._new.has(a.id);
+  const aTitle = h("span", {}, a.name || a.id);
+  const aName = inp(a, "name", { placeholder: `RTI AD-8x (${a.id})` });
+  const syncA = () => { aTitle.textContent = a.name || a.id; aName.placeholder = `RTI AD-8x (${a.id})`; };
+  aName.addEventListener("input", syncA);
   const idInput = h("input", { value: a.id, readonly: !isNew,
-    oninput: e => { f._new.delete(a.id); a.id = e.target.value.trim(); f._new.add(a.id); markDirty(); } });
+    oninput: e => { f._new.delete(a.id); a.id = e.target.value.trim(); f._new.add(a.id); syncA(); markDirty(); } });
   const zones = h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Zone name"), h("th", {}, "Entity id"))),
     h("tbody", {}, Object.keys(a.zones).map(n => {
       const z = a.zones[n];
@@ -519,13 +527,13 @@ function ampCard(a, i) {
     h("tbody", {}, Object.keys(a.sources).map(n => h("tr", {}, h("td", { class: "n" }, n),
       h("td", {}, inp(a.sources, n, { placeholder: n }))))));
   return h("div", { class: "card" },
-    h("h3", {}, a.name || a.id, h("span", { class: "spacer" }),
+    h("h3", {}, aTitle, h("span", { class: "spacer" }),
       h("button", { class: "btn danger", onclick: () => {
         if (!confirm(`Remove ${a.id}? Its Home Assistant entities will be removed on restart (if orphan cleanup is on).`)) return;
         f.amps.splice(i, 1); markDirty(); renderForm(); } }, "Remove amp")),
     h("div", { class: "grid" },
       field("Id", idInput, isNew ? "a-z, 0-9, _ – used in topics, can't change later" : "fixed – used in topics and entity ids"),
-      field("Display name", inp(a, "name", { placeholder: `RTI AD-8x (${a.id})` })),
+      field("Display name", aName),
       field("Host / IP", inp(a, "host", { placeholder: "192.168.1.x" })),
       field("Telnet port", inp(a, "port", { type: "number" }))),
     h("div", { class: "two" }, zones, sources));
