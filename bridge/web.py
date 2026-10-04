@@ -144,6 +144,10 @@ def form_get(path: str) -> dict:
         "cleanup_orphans": bool(cfg.discovery.get("cleanup_orphans")),
         "log_level": str(cfg.logging.get("level", "INFO")).upper(),
         "poll_interval_sec": cfg.timing["poll_interval_sec"],
+        # advanced timing: only what the file sets (None = built-in default)
+        "timing": {k: (plain.get("timing") or {}).get(k) for k in settings_mod.DEFAULTS["timing"]
+                   if k != "poll_interval_sec"},
+        "timing_defaults": {k: v for k, v in settings_mod.DEFAULTS["timing"].items() if k != "poll_interval_sec"},
         "web_port": cfg.web["port"],
         "web_has_password": bool(cfg.web["password"]),
         "env_overrides": sorted(k for k in settings_mod.ENV_OVERRIDES if os.getenv(k)),
@@ -195,6 +199,29 @@ def form_save(path: str, data: dict) -> None:
         _section(doc, "discovery")["cleanup_orphans"] = bool(data["cleanup_orphans"])
     if "log_level" in data:
         _section(doc, "logging")["level"] = str(data["log_level"]).upper()
+    if isinstance(data.get("timing"), dict):
+        t = _section(doc, "timing")
+        for k, default in settings_mod.DEFAULTS["timing"].items():
+            if k == "poll_interval_sec" or k not in data["timing"]:
+                continue
+            v = data["timing"][k]
+            if v is None or (isinstance(v, str) and not v.strip()):
+                if k in t:
+                    del t[k]           # back to the built-in default
+                continue
+            if isinstance(default, bool):
+                v = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "on", "yes")
+            elif isinstance(default, int):
+                v = int(float(v))
+            else:
+                fv = float(v)
+                v = int(fv) if fv.is_integer() else fv
+            if k in t:
+                t[k] = v
+            else:
+                # insert before the last key: trailing comment blocks in the file are
+                # attached to the last key, and new keys would otherwise land below them
+                t.insert(max(0, len(t) - 1), k, v)
     if "poll_interval_sec" in data:
         v = float(data["poll_interval_sec"])
         _section(doc, "timing")["poll_interval_sec"] = int(v) if v.is_integer() else v

@@ -461,8 +461,49 @@ function renderForm() {
     markDirty(); renderForm();
   } }, "+ Add VHD-8x matrix");
 
-  root.replaceChildren(...[envNote, general, ...amps, add,
+  root.replaceChildren(...[envNote, general, timingCard(), ...amps, add,
     h("h3", { style: "margin:22px 0 10px;font-size:15px" }, "Video matrices"), ...mxs, addMx].filter(Boolean));
+}
+
+const TIMING_HELP = {
+  connect_timeout_sec: "Give up connecting to an amp after this long",
+  per_cmd_timeout_sec: "Wait this long for an amp to answer a query",
+  post_send_settle_sec: "Pause after sending a command before reading",
+  inter_cmd_sleep_sec: "Gap between telnet commands during a poll – raise if you see 'partial poll fail'",
+  set_retries: "Re-send a command this many times if the amp doesn't confirm",
+  retry_sleep_sec: "Pause between those retries",
+  vol_coalesce_sec: "Collect slider moves this long, then send one volume command",
+  vol_echo_suppress_sec: "Ignore polled volume this long after setting it (stops the slider jumping back)",
+  health_check_interval_sec: "How often diagnostics are published to MQTT",
+  dump_raw_chunks: "At DEBUG log level, also log raw bytes from the amps",
+  tone_settle_sec: "Bass/treble: send once, wait this long, then verify once",
+  reconnect_backoff_initial_sec: "First retry delay after a failed poll (doubles each time)",
+  reconnect_backoff_max_sec: "Longest retry delay",
+  amp_start_stagger_sec: "Offset between amps so they don't poll in lockstep",
+};
+function timingCard() {
+  const f = form, t = f.timing || {}, d = f.timing_defaults || {};
+  const set = Object.keys(t).filter(k => t[k] !== null && t[k] !== undefined).length;
+  const fields = Object.keys(d).map(k => {
+    const def = d[k];
+    let input;
+    if (typeof def === "boolean") {
+      const cur = t[k] === null || t[k] === undefined ? "" : String(!!t[k]);
+      input = h("select", { onchange: e => { t[k] = e.target.value === "" ? null : e.target.value === "true"; markDirty(); } },
+        h("option", { value: "", selected: cur === "" }, `default (${def ? "on" : "off"})`),
+        h("option", { value: "true", selected: cur === "true" }, "on"),
+        h("option", { value: "false", selected: cur === "false" }, "off"));
+    } else {
+      input = h("input", { type: "number", step: "any", min: 0, value: t[k] ?? "", placeholder: `default ${def}`,
+        oninput: e => { t[k] = e.target.value === "" ? null : Number(e.target.value); markDirty(); } });
+    }
+    return field(k.replace(/_sec$/, " (s)").replace(/_/g, " "), input, TIMING_HELP[k]);
+  });
+  return h("details", { class: "card" },
+    h("summary", { style: "cursor:pointer;font-weight:600" },
+      "Advanced timing ", h("span", { class: "hint" }, set ? `· ${set} changed from default` : "· all defaults")),
+    h("div", { class: "hint", style: "margin:10px 0" }, "Leave a field blank to use the built-in default – blank fields are removed from config.yaml, so future default improvements apply automatically."),
+    h("div", { class: "grid" }, fields));
 }
 
 function matrixCard(m, i) {

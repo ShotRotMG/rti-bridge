@@ -15,6 +15,7 @@ Version 1.8.2
   2.1.0: RTI VHD-8x matrix module (HTTP): source select per output, signal/link sensors
   2.1.1: from upstream 2.0.x: paced bass/treble (one send, settle, one verify),
          exponential reconnect backoff, staggered amp start, 0.2s command pacing
+  2.1.2: advanced timing section in the web config form
 """
 import os
 import sys
@@ -64,7 +65,7 @@ class _RingHandler(logging.Handler):
 LOG_BUFFER = _RingHandler()
 LOG_BUFFER.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
 logging.getLogger().addHandler(LOG_BUFFER)
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 
 
 # CONFIG - populated from config.yaml by apply_settings() at startup
