@@ -38,6 +38,8 @@ If it isn't valid, the bridge logs exactly what's wrong and exits.
 
 - **Amps:** list as many as you have. Each needs an `id` (used in topics, so don't change it once set),
   a `host`, and optionally a `port`, which defaults to 23.
+  An optional `name` sets the device name in Home Assistant. You can change it at any time;
+  entity IDs don't change.
 - **Zones:** `1: Kitchen` or `1: { name: Kitchen, id: kitchen }`. The `id` pins the Home Assistant entity,
   so you can rename the zone without breaking dashboards. Unlisted zones show up as "Zone N".
 - **Sources:** optional labels, for example `sources: { 1: Sonos 1 }`. Unlabelled inputs show as `1`–`8`.
@@ -52,7 +54,7 @@ Environment variables override the file. Use them to keep the password out of `c
 |---|---|
 | `MQTT_HOST`, `MQTT_PORT`, `MQTT_USER`, `MQTT_PASS` | `mqtt.*` (no quotes around values) |
 | `MQTT_BASE`, `DISCOVERY_PREFIX` | `mqtt.base_topic`, `mqtt.discovery_prefix` |
-| `LOG_LEVEL` | `logging.level` |
+| `LOG_LEVEL` | `logging.level` (`DEBUG` shows every telnet command) |
 | `CONFIG_PATH` | location of config.yaml |
 
 ## Deploy

@@ -34,6 +34,7 @@ timing:
 # One entry per AD-8x. Add or remove amps freely.
 #
 #   id       used in MQTT topics and entity IDs - don't change once set
+#   name     optional device name shown in Home Assistant; safe to change anytime
 #   zones    1-8. Either "Name" or {name: Name, id: some_id}.
 #            The id pins the HA entity: with an id you can rename the zone freely.
 #            Without one, the id is derived from the name, so a rename makes a
@@ -42,6 +43,7 @@ timing:
 #   sources  optional labels for inputs 1-8. Unlabelled inputs show as "1".."8".
 amps:
   - id: amp1
+    # name: Outdoor Amp        # optional HA device name (default "RTI AD-8x (amp1)")
     host: 192.168.1.133
     port: 23
     zones:

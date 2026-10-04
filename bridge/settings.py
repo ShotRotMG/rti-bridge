@@ -89,6 +89,11 @@ class Amp:
     port: int
     zones: Dict[int, Zone]
     sources: Dict[int, str]  # number -> label ("1".."8" when unnamed)
+    name: str = ""           # optional HA device name
+
+    @property
+    def device_name(self) -> str:
+        return self.name or f"RTI AD-8x ({self.id})"
 
     def source_label(self, n: int) -> str:
         return self.sources.get(n, str(n))
@@ -247,7 +252,8 @@ def parse(raw: dict, path: str = "<memory>", apply_env: bool = True) -> Settings
             port = int(a.get("port", 23))
         except (TypeError, ValueError):
             raise ConfigError(f"amps.{amp_id}.port must be a number")
-        amps.append(Amp(amp_id, host, port, _parse_zones(amp_id, a.get("zones")), _parse_sources(amp_id, a.get("sources"))))
+        amps.append(Amp(amp_id, host, port, _parse_zones(amp_id, a.get("zones")),
+                        _parse_sources(amp_id, a.get("sources")), str(a.get("name") or "").strip()))
 
     return Settings(
         path=path, raw=raw, mqtt=cfg["mqtt"], discovery=cfg["discovery"],

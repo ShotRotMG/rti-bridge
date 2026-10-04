@@ -10,6 +10,7 @@ Version 1.8.2
          pinned zone ids, orphaned discovery cleanup
   1.9.1: Docker image (dependencies baked in at build time)
   1.9.2: compose pull_policy: build so redeploys pick up new commits
+  1.9.3: telnet TX logged at DEBUG; one INFO line per incoming command; optional amp names
 """
 import os
 import sys
@@ -37,7 +38,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("rti_ad8x_bridge")
-__version__ = "1.9.2"
+__version__ = "1.9.3"
 
 
 # CONFIG - populated from config.yaml by apply_settings() at startup
@@ -140,7 +141,7 @@ def device_block(amp_key: str) -> dict:
         "identifiers": [f"ad8x_{amp_key}"],
         "manufacturer": "RTI",
         "model": "AD-8x",
-        "name": f"RTI AD-8x ({amp_key})",
+        "name": SETTINGS.amp(amp_key).device_name,
     }
 
 
@@ -260,7 +261,7 @@ class AmpSession(threading.Thread):
             raise RuntimeError("no socket")
         cmd_ascii = cmd_ascii.strip().upper()
         self.sock.sendall(cmd_ascii.encode("ascii", "ignore") + EOL)
-        log.info(f"[{self.amp_name}] TX {cmd_ascii}")
+        log.debug(f"[{self.amp_name}] TX {cmd_ascii}")
 
     def _send_only(self, cmd_ascii: str) -> bool:
         with self.lock:
@@ -833,6 +834,7 @@ class Bridge:
                     with sess.lock:
                         if not sess.connected and not sess._connect():
                             return
+                        log.info(f"[{parts[0]}] raw <- '{payload}'")
                         sess._send_ascii(payload)
                         time.sleep(POST_SEND_SETTLE)
                         line = sess._readline(PER_CMD_TIMEOUT)
@@ -842,6 +844,7 @@ class Bridge:
             if len(parts) != 5 or parts[1] != "zone" or parts[3] != "set":
                 return
             amp, zone_str, cmd = parts[0], parts[2], parts[4].lower()
+            log.info(f"[{amp}] zone {zone_str} {cmd} <- '{payload}'")
             try:
                 zone = int(zone_str)
             except ValueError:
