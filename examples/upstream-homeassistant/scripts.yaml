@@ -1,0 +1,117 @@
+rti_all_off_everything:
+  alias: "RTI: All Rooms Off (Pause Sonos + Amps Off)"
+  mode: parallel
+  sequence:
+    - service: media_player.media_pause
+      target:
+        entity_id:
+          - media_player.sonos_1
+          - media_player.sonos_2
+          - media_player.bedroom
+          - media_player.basement_sonos
+          - media_player.move_2
+          - media_player.sonos_roam
+          - media_player.family_room
+    - service: mqtt.publish
+      data:
+        topic: rti/ad8x/all/command   # <-- CORRECTED
+        payload: 'OFF'  
+
+# Button-driven path: toggle power; on turn-on, wait for source to settle and resume Sonos 1/2 (entire group)
+rti_zone_power_autoplay:
+  alias: "RTI: Zone Power (+optional autoplay)"
+  mode: parallel
+  fields:
+    zone_switch:
+      description: RTI zone power switch (e.g., switch.rti_ad_8x_amp1_kitchen_power)
+      example: switch.rti_ad_8x_amp1_kitchen_power
+    source_select:
+      description: The zone's source select (e.g., select.rti_ad_8x_amp1_kitchen_source)
+      example: select.rti_ad_8x_amp1_kitchen_source
+    autoplay:
+      description: If true, resume Sonos when source is 1 or 2
+      example: true
+      default: true
+  sequence:
+    # If zone is already ON -> turn it OFF (no autoplay)
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ is_state(zone_switch, 'on') }}"
+          sequence:
+            - service: switch.turn_off
+              target:
+                entity_id: "{{ zone_switch }}"
+      default:
+        # Turn zone ON
+        - service: switch.turn_on
+          target:
+            entity_id: "{{ zone_switch }}"
+        # Wait a moment for source select to settle to '1' or '2'
+        - wait_template: "{{ states(source_select) in ['1','2'] }}"
+          timeout: "00:00:01"
+          continue_on_timeout: true
+        - delay:
+            milliseconds: 400  # tiny extra cushion
+
+        # Only autoplay if requested
+        - condition: template
+          value_template: "{{ (autoplay | default(true)) | bool }}"
+
+        # Determine target port from source
+        - variables:
+            src_num: "{{ states(source_select) | string }}"
+            port: >
+              {% set m = {'1':'media_player.sonos_1','2':'media_player.sonos_2'} %}
+              {{ m.get(src_num) }}
+
+        # If not mapped to Sonos 1/2, skip
+        - condition: template
+          value_template: "{{ port is not none }}"
+
+        # Use the helper script below to resume the port's group (handles non-coordinator cases)
+        - service: script.rti_autoplay_from_port_group
+          data:
+            port: "{{ port }}"
+            allow_when_paused: true
+
+# Automation-friendly helper: resume a Sonos port's entire group safely
+rti_autoplay_from_port_group:
+  alias: "RTI: Autoplay Sonos Port (smart group resume)"
+  mode: parallel
+  fields:
+    port:
+      description: Sonos media_player entity_id (e.g., media_player.sonos_2)
+      example: media_player.sonos_2
+    allow_when_paused:
+      description: If true, resume when state is paused; otherwise only when idle/off
+      example: true
+      default: true
+  sequence:
+    # Must have a valid entity_id string
+    - condition: template
+      value_template: "{{ port is string and port | length > 0 }}"
+
+    # Check current player state
+    - variables:
+        player_state: "{{ states(port) }}"
+        allowed: >
+          {% set base = ['idle','off','unknown','unavailable'] %}
+          {{ (base + (['paused'] if (allow_when_paused | default(true)) else [])) }}
+    - condition: template
+      value_template: "{{ player_state in allowed }}"
+
+    # Determine current group (fallback to the port itself)
+    - variables:
+        group_list: "{{ state_attr(port, 'sonos_group') or [port] }}"
+
+    # Log an entry so it's easy to see what ran
+    - service: logbook.log
+      data:
+        name: "RTI Autoplay"
+        message: "port={{ port }}, state={{ player_state }}, group={{ group_list | join(',') }}"
+
+    # Resume playback on the whole group (works even if port isn't the coordinator)
+    - service: media_player.media_play
+      target:
+        entity_id: "{{ group_list }}"

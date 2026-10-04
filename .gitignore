@@ -1,0 +1,9 @@
+# secrets / local config
+.env
+config/config.yaml
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
