@@ -15,6 +15,7 @@ with stability fixes: continue-on-zone-failure, poll reconnect, and no credentia
 ```
 bridge/                       Python bridge (rti_ad8x_bridge.py, settings.py) + mqtt_test.py
 config.example.yaml           copy to config/config.yaml
+Dockerfile, docker-compose.yml container build (see Deploy)
 deploy/systemd/               systemd unit, if you run it outside Docker
 scripts/restart-bridge.sh     restarts the systemd service
 docs/                         protocol and setup notes from upstream
@@ -53,6 +54,41 @@ Environment variables override the file. Use them to keep the password out of `c
 | `MQTT_BASE`, `DISCOVERY_PREFIX` | `mqtt.base_topic`, `mqtt.discovery_prefix` |
 | `LOG_LEVEL` | `logging.level` |
 | `CONFIG_PATH` | location of config.yaml |
+
+## Deploy
+
+### Portainer (recommended)
+
+1. On the Docker host, create the config folder and put your config in it:
+   ```bash
+   mkdir -p /home/charro/docker/bridges/rti-bridge/config
+   # copy config.example.yaml there as config.yaml and edit it
+   ```
+2. **Stop the old `rti-ad8x-bridge` stack first.** Two bridges polling the same amps will fight
+   over the telnet sessions.
+3. Portainer → Stacks → Add stack → **Repository**
+   - Repository URL: `https://github.com/ShotRotMG/rti-bridge`
+   - Authentication: on. Use your GitHub username and a personal access token with read access to this repo.
+   - Compose path: `docker-compose.yml`
+   - Environment variables:
+     - `CONFIG_DIR` = `/home/charro/docker/bridges/rti-bridge/config`
+     - `MQTT_PASS` = your broker password, so it can stay out of config.yaml
+4. Deploy. To update later, use **Pull and redeploy** on the stack and tick "Re-pull image and redeploy",
+   which rebuilds from the latest commit.
+
+### Docker Compose from a clone
+
+```bash
+git clone https://github.com/ShotRotMG/rti-bridge && cd rti-bridge
+cp config.example.yaml config/config.yaml   # edit it
+docker compose up -d --build
+docker compose logs -f
+```
+
+### systemd (no Docker)
+
+See `deploy/systemd/rti-ad8x-bridge.service` and `scripts/restart-bridge.sh`. Set `CONFIG_PATH` in
+`/etc/default/rti-ad8x-bridge` if config.yaml isn't at `/config/config.yaml` or `./config/config.yaml`.
 
 ## MQTT topics
 

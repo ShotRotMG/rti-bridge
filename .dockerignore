@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+config/
+docs/
+examples/
+deploy/
+scripts/
+*.md
+**/__pycache__

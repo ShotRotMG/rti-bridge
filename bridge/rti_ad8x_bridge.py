@@ -8,6 +8,7 @@ Version 1.8.2
   1.8.2: MQTT settings from environment, no credentials in source or logs
   1.9.0: everything from config.yaml (any number of amps), optional source labels,
          pinned zone ids, orphaned discovery cleanup
+  1.9.1: Docker image (dependencies baked in at build time)
 """
 import os
 import sys
@@ -35,7 +36,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("rti_ad8x_bridge")
-__version__ = "1.9.0"
+__version__ = "1.9.1"
 
 
 # CONFIG - populated from config.yaml by apply_settings() at startup

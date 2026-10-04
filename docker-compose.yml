@@ -1,0 +1,17 @@
+# Works as-is with `docker compose up -d --build`, or as a Portainer
+# "Repository" stack pointed at this repo (see README > Deploy).
+services:
+  rti-bridge:
+    build: .
+    image: rti-bridge:latest
+    container_name: rti-bridge
+    restart: unless-stopped
+    network_mode: host            # amps are on 192.168.1.x, broker on 10.0.0.x
+    environment:
+      - TZ=America/Los_Angeles
+      # Optional overrides of config.yaml - set these in the Portainer stack env
+      - MQTT_PASS=${MQTT_PASS:-}
+      - LOG_LEVEL=${LOG_LEVEL:-}
+    volumes:
+      # Absolute host path in Portainer; ./config when run from a clone
+      - ${CONFIG_DIR:-./config}:/config
