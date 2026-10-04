@@ -1,0 +1,73 @@
+# rti-bridge configuration
+# Copy to config/config.yaml (gitignored) or mount it at /config/config.yaml.
+# MQTT_HOST / MQTT_PORT / MQTT_USER / MQTT_PASS / LOG_LEVEL env vars override this file.
+
+mqtt:
+  host: 10.0.0.103
+  port: 1883
+  user: home
+  password: ""                 # leave blank and set MQTT_PASS in the container env, or fill in here
+  base_topic: rti/ad8x         # changing this moves every state/command topic
+  discovery_prefix: homeassistant
+
+discovery:
+  # On startup, delete retained HA discovery entries that belong to these amps
+  # but aren't in this file any more (renamed zones, removed amps). Logged.
+  cleanup_orphans: true
+
+logging:
+  level: INFO                  # DEBUG also dumps raw telnet bytes
+
+timing:
+  poll_interval_sec: 20        # full 8-zone poll per amp
+  # connect_timeout_sec: 6
+  # per_cmd_timeout_sec: 5
+  # post_send_settle_sec: 0.1
+  # inter_cmd_sleep_sec: 0.08
+  # set_retries: 2
+  # retry_sleep_sec: 0.2
+  # vol_coalesce_sec: 1.2
+  # vol_echo_suppress_sec: 1.0
+  # health_check_interval_sec: 30
+  # dump_raw_chunks: true
+
+# One entry per AD-8x. Add or remove amps freely.
+#
+#   id       used in MQTT topics and entity IDs - don't change once set
+#   zones    1-8. Either "Name" or {name: Name, id: some_id}.
+#            The id pins the HA entity: with an id you can rename the zone freely.
+#            Without one, the id is derived from the name, so a rename makes a
+#            new entity (and cleanup_orphans removes the old one).
+#            Unlisted zones show up as "Zone N".
+#   sources  optional labels for inputs 1-8. Unlabelled inputs show as "1".."8".
+amps:
+  - id: amp1
+    host: 192.168.1.133
+    port: 23
+    zones:
+      1: { name: Saloon Patio, id: saloon_patio }
+      2: { name: Master Bath,  id: master_bath }
+      3: { name: Master Patio, id: master_patio }
+      4: { name: Lanai,        id: lanai }
+      5: { name: Barbeque,     id: barbeque }
+      6: { name: Cabana,       id: cabana }
+      7: { name: Garage,       id: garage }
+      8: { name: M-Bath Patio, id: m_bath_patio }
+    sources: {}
+    # sources:
+    #   1: Sonos 1
+    #   2: Sonos 2
+
+  - id: amp2
+    host: 192.168.1.163
+    port: 23
+    zones:
+      1: { name: Kitchen,     id: kitchen }
+      2: { name: Living Room, id: living_room }
+      3: { name: Saloon Bar,  id: saloon_bar }
+      4: { name: Dining Room, id: dining_room }
+      5: { name: Office,      id: office }
+      6: { name: Gym,         id: gym }
+      7: { name: Courtyard,   id: courtyard }
+      8: { name: Stage,       id: stage }
+    sources: {}

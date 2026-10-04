@@ -6,6 +6,8 @@ Version 1.8.2
   1.8.1 + stability fixes (Dec 2025) + continue-on-zone-failure
   + poll-reconnect fix (Jun 2026)
   1.8.2: MQTT settings from environment, no credentials in source or logs
+  1.9.0: everything from config.yaml (any number of amps), optional source labels,
+         pinned zone ids, orphaned discovery cleanup
 """
 import os
 import sys
@@ -21,6 +23,9 @@ from typing import Optional, Tuple
 import paho.mqtt.client as mqtt
 import psutil  # REQUIRED FOR METRICS
 
+import settings as settings_mod
+from settings import ConfigError, Settings, slugify, ZONES_PER_AMP
+
 
 # LOGGING
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -30,58 +35,49 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("rti_ad8x_bridge")
-print("RTI Bridge starting up...")  # Fixed: only ASCII dots
+__version__ = "1.9.0"
 
 
-# CONFIG
-AMPS = {
-    "amp1": ("192.168.1.133", 23),
-    "amp2": ("192.168.1.163", 23),
-}
-
-ZONE_NAMES = {
-    "amp1": {
-        1: "Saloon Patio",
-        2: "Master Bath",
-        3: "Master Patio",
-        4: "Lanai",
-        5: "Barbeque",
-        6: "Cabana",
-        7: "Garage",
-        8: "M-Bath Patio",
-    },
-    "amp2": {
-        1: "Kitchen",
-        2: "Living Room",
-        3: "Saloon Bar",
-        4: "Dining Room",
-        5: "Office",
-        6: "Gym",
-        7: "Courtyard",
-        8: "Stage",
-    },
-}
-
-MQTT_HOST = os.getenv("MQTT_HOST", "127.0.0.1")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_USER = os.getenv("MQTT_USER", "")
-MQTT_PASS = os.getenv("MQTT_PASS", "")
-MQTT_BASE = os.getenv("MQTT_BASE", "rti/ad8x")
-DISCOVERY_PREFIX = os.getenv("DISCOVERY_PREFIX", "homeassistant")
-
-log.info(f"MQTT broker {MQTT_HOST}:{MQTT_PORT} user={MQTT_USER or '(none)'} password={'set' if MQTT_PASS else 'not set'}")
-
-POLL_INTERVAL_SEC = float(os.getenv("POLL_INTERVAL", "20.0"))
-CONNECT_TIMEOUT = float(os.getenv("CONNECT_TIMEOUT", "6.0"))
-PER_CMD_TIMEOUT = float(os.getenv("PER_CMD_TIMEOUT", "5.0"))
-POST_SEND_SETTLE = float(os.getenv("POST_SEND_SETTLE", "0.1"))
-INTER_CMD_SLEEP = float(os.getenv("INTER_CMD_SLEEP", "0.08"))
-SET_RETRIES = int(os.getenv("SET_RETRIES", "2"))
-RETRY_SLEEP = float(os.getenv("RETRY_SLEEP", "0.2"))
-DUMP_RAW_CHUNKS = os.getenv("DUMP_RAW_CHUNKS", "1") not in ("0", "false", "False")
-VOL_COALESCE_SEC = float(os.getenv("VOL_COALESCE_SEC", "1.2"))
-VOL_ECHO_SUPPRESS_SEC = float(os.getenv("VOL_ECHO_SUPPRESS_SEC", "1.00"))
+# CONFIG - populated from config.yaml by apply_settings() at startup
+SETTINGS: Optional[Settings] = None
+MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS = "127.0.0.1", 1883, "", ""
+MQTT_BASE, DISCOVERY_PREFIX = "rti/ad8x", "homeassistant"
+POLL_INTERVAL_SEC = 20.0
+CONNECT_TIMEOUT = 6.0
+PER_CMD_TIMEOUT = 5.0
+POST_SEND_SETTLE = 0.1
+INTER_CMD_SLEEP = 0.08
+SET_RETRIES = 2
+RETRY_SLEEP = 0.2
+DUMP_RAW_CHUNKS = True
+VOL_COALESCE_SEC = 1.2
+VOL_ECHO_SUPPRESS_SEC = 1.0
 HEALTH_CHECK_INTERVAL = 30.0
+ORPHAN_SCAN_SEC = 5.0  # how long to collect retained discovery configs before cleanup
+
+
+def apply_settings(cfg: Settings):
+    global SETTINGS, MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS, MQTT_BASE, DISCOVERY_PREFIX
+    global POLL_INTERVAL_SEC, CONNECT_TIMEOUT, PER_CMD_TIMEOUT, POST_SEND_SETTLE, INTER_CMD_SLEEP
+    global SET_RETRIES, RETRY_SLEEP, DUMP_RAW_CHUNKS, VOL_COALESCE_SEC, VOL_ECHO_SUPPRESS_SEC
+    global HEALTH_CHECK_INTERVAL
+    SETTINGS = cfg
+    m, t = cfg.mqtt, cfg.timing
+    MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS = m["host"], m["port"], m["user"], m["password"]
+    MQTT_BASE, DISCOVERY_PREFIX = m["base_topic"], m["discovery_prefix"]
+    POLL_INTERVAL_SEC = t["poll_interval_sec"]
+    CONNECT_TIMEOUT = t["connect_timeout_sec"]
+    PER_CMD_TIMEOUT = t["per_cmd_timeout_sec"]
+    POST_SEND_SETTLE = t["post_send_settle_sec"]
+    INTER_CMD_SLEEP = t["inter_cmd_sleep_sec"]
+    SET_RETRIES = t["set_retries"]
+    RETRY_SLEEP = t["retry_sleep_sec"]
+    DUMP_RAW_CHUNKS = t["dump_raw_chunks"]
+    VOL_COALESCE_SEC = t["vol_coalesce_sec"]
+    VOL_ECHO_SUPPRESS_SEC = t["vol_echo_suppress_sec"]
+    HEALTH_CHECK_INTERVAL = t["health_check_interval_sec"]
+    logging.getLogger().setLevel(getattr(logging, str(cfg.logging["level"]).upper(), logging.INFO))
+
 
 EOL, ESC2 = b"\r", b"\x1b" + b"2"
 
@@ -133,10 +129,6 @@ def _encode_tone(level: int) -> str:
     return f"{lvl:02d}" if lvl >= 0 else f"{abs(lvl) + 20:02d}"
 
 
-def slugify(s: str) -> str:
-    return "".join(ch.lower() if ch.isalnum() else "_" for ch in s).strip("_")
-
-
 def discovery_topic(component: str, object_id: str) -> str:
     return f"{DISCOVERY_PREFIX}/{component}/{object_id}/config"
 
@@ -151,8 +143,10 @@ def device_block(amp_key: str) -> dict:
 
 
 def zone_object_id(amp_key: str, zone: int, suffix: str) -> str:
-    name = ZONE_NAMES.get(amp_key, {}).get(zone, f"Zone {zone}")
-    return slugify(f"ad8x_{amp_key}_{name}_{suffix}")
+    # Same shape as the original bridge, but keyed on the zone's pinned id
+    # instead of its display name, so renames don't create new entities.
+    zid = SETTINGS.amp(amp_key).zones[zone].id
+    return slugify(f"ad8x_{amp_key}_{zid}_{suffix}")
 
 
 class AmpSession(threading.Thread):
@@ -290,6 +284,8 @@ class AmpSession(threading.Thread):
         self.mqttc.publish(f"{base}/power", "on" if sta_data["power"] else "off", retain=True)
         self.mqttc.publish(f"{base}/mute", "on" if sta_data["mute"] else "off", retain=True)
         self.mqttc.publish(f"{base}/source", str(sta_data["source"]), retain=True)
+        amp_cfg = SETTINGS.amp(self.amp_name)
+        self.mqttc.publish(f"{base}/source_label", amp_cfg.source_label(sta_data["source"]), retain=True)
         self.mqttc.publish(f"{base}/bass", str(tone_data["bass"]), retain=True)
         self.mqttc.publish(f"{base}/treble", str(tone_data["treble"]), retain=True)
 
@@ -504,7 +500,7 @@ class AmpSession(threading.Thread):
                 return False
             success_count = 0
             try:
-                for z in range(1, 9):
+                for z in range(1, ZONES_PER_AMP + 1):
                     if self.stop_flag.is_set():
                         return False
                     try:
@@ -587,13 +583,24 @@ class Bridge:
         self._pid = os.getpid()
         self._process = psutil.Process(self._pid)
         self._last_diag_pub_time = time.monotonic()
+        self._published_disc: set = set()
+        self._scan_lock = threading.Lock()
+        self._scanning = False
+        self._scan_seen: set = set()
+
+    def _pub_disc(self, component: str, object_id: str, cfg: dict):
+        t = discovery_topic(component, object_id)
+        self._published_disc.add(t)
+        self.client.publish(t, json.dumps(cfg), retain=True)
 
     def publish_discovery(self):
-        for amp_key in AMPS.keys():
+        self._published_disc = set()
+        for amp in SETTINGS.amps:
+            amp_key = amp.id
             avail_t = self._topic(amp_key, "status")
             dev = device_block(amp_key)
-            for z in range(1, 9):
-                zname = ZONE_NAMES.get(amp_key, {}).get(z, f"Zone {z}")
+            for z in range(1, ZONES_PER_AMP + 1):
+                zname = amp.zones[z].name
                 base = self._topic(amp_key, "zone", z)
                 cmd_base = f"{base}/set"
 
@@ -610,7 +617,7 @@ class Bridge:
                     "device": dev,
                     "optimistic": True,
                 }
-                self.client.publish(discovery_topic("switch", zone_object_id(amp_key, z, "power")), json.dumps(power_cfg), retain=True)
+                self._pub_disc("switch", zone_object_id(amp_key, z, "power"), power_cfg)
 
                 mute_cfg = {
                     "name": f"{zname} Mute",
@@ -625,7 +632,7 @@ class Bridge:
                     "device": dev,
                     "optimistic": True,
                 }
-                self.client.publish(discovery_topic("switch", zone_object_id(amp_key, z, "mute")), json.dumps(mute_cfg), retain=True)
+                self._pub_disc("switch", zone_object_id(amp_key, z, "mute"), mute_cfg)
 
                 vol_cfg = {
                     "name": f"{zname} Volume",
@@ -641,18 +648,18 @@ class Bridge:
                     "cmd_tpl": "{{ 75 - (value | int) }}",
                     "optimistic": True,
                 }
-                self.client.publish(discovery_topic("number", zone_object_id(amp_key, z, "volume")), json.dumps(vol_cfg), retain=True)
+                self._pub_disc("number", zone_object_id(amp_key, z, "volume"), vol_cfg)
 
                 source_cfg = {
                     "name": f"{zname} Source",
                     "uniq_id": zone_object_id(amp_key, z, "source"),
-                    "stat_t": f"{base}/source",
+                    "stat_t": f"{base}/source_label",
                     "cmd_t": f"{cmd_base}/source",
-                    "options": [str(i) for i in range(1, 9)],
+                    "options": amp.source_options,
                     "avty_t": avail_t,
                     "device": dev,
                 }
-                self.client.publish(discovery_topic("select", zone_object_id(amp_key, z, "source")), json.dumps(source_cfg), retain=True)
+                self._pub_disc("select", zone_object_id(amp_key, z, "source"), source_cfg)
 
                 bass_cfg = {
                     "name": f"{zname} Bass",
@@ -668,7 +675,7 @@ class Bridge:
                     "icon": "mdi:speaker",
                     "optimistic": True,
                 }
-                self.client.publish(discovery_topic("number", zone_object_id(amp_key, z, "bass")), json.dumps(bass_cfg), retain=True)
+                self._pub_disc("number", zone_object_id(amp_key, z, "bass"), bass_cfg)
 
                 treble_cfg = {
                     "name": f"{zname} Treble",
@@ -684,7 +691,45 @@ class Bridge:
                     "icon": "mdi:surround-sound",
                     "optimistic": True,
                 }
-                self.client.publish(discovery_topic("number", zone_object_id(amp_key, z, "treble")), json.dumps(treble_cfg), retain=True)
+                self._pub_disc("number", zone_object_id(amp_key, z, "treble"), treble_cfg)
+
+    # ---- orphaned discovery cleanup -------------------------------------
+    def _start_orphan_scan(self):
+        if not SETTINGS.discovery.get("cleanup_orphans"):
+            return
+        with self._scan_lock:
+            if self._scanning:
+                return
+            self._scanning = True
+            self._scan_seen = set()
+        self.client.subscribe(f"{DISCOVERY_PREFIX}/+/+/config")
+        log.info(f"[Bridge] Scanning retained discovery configs for orphans ({ORPHAN_SCAN_SEC:.0f}s)...")
+        threading.Timer(ORPHAN_SCAN_SEC, self._finish_orphan_scan).start()
+
+    def _note_discovery_config(self, topic: str, payload: str):
+        if not payload:
+            return
+        try:
+            cfg = json.loads(payload)
+        except ValueError:
+            return
+        dev = cfg.get("device") or cfg.get("dev") or {}
+        ids = dev.get("identifiers") or dev.get("ids") or []
+        if isinstance(ids, str):
+            ids = [ids]
+        if any(str(i).startswith("ad8x_") for i in ids):
+            with self._scan_lock:
+                self._scan_seen.add(topic)
+
+    def _finish_orphan_scan(self):
+        self.client.unsubscribe(f"{DISCOVERY_PREFIX}/+/+/config")
+        with self._scan_lock:
+            self._scanning = False
+            orphans = sorted(self._scan_seen - self._published_disc)
+        for t in orphans:
+            log.info(f"[Bridge] Removing orphaned discovery entry {t}")
+            self.client.publish(t, b"", retain=True)
+        log.info(f"[Bridge] Orphan scan done: removed {len(orphans)} entr{'y' if len(orphans) == 1 else 'ies'}")
 
     def publish_diagnostics(self):
         if not self.client.is_connected():
@@ -704,7 +749,7 @@ class Bridge:
         amp_statuses = {name: "online" if s.connected else "offline" for name, s in self.sessions.items()}
         self.client.publish(self._topic("diagnostics", "amp_connection_status"), json.dumps(amp_statuses), retain=True)
 
-        entity_count = len(self.sessions) * 8
+        entity_count = len(self._published_disc)
         self.client.publish(self._topic("diagnostics", "entity_count"), str(entity_count), retain=True)
         self.client.publish(self._topic("bridge", "status"), "online", retain=True)
 
@@ -722,7 +767,8 @@ class Bridge:
         except Exception as e:
             log.warning(f"[Bridge] Initial psutil call failed: {e}")
 
-        for name, addr in AMPS.items():
+        for amp in SETTINGS.amps:
+            name, addr = amp.id, (amp.host, amp.port)
             s = AmpSession(name, addr, self.client)
             self.sessions[name] = s
             s.start()
@@ -739,9 +785,10 @@ class Bridge:
             client.subscribe(f"{self._topic('+', 'zone', '+', 'set', '+')}")
             client.subscribe(f"{self._topic('+', 'raw')}")
             client.subscribe(f"{self._topic('all', 'command')}")
-            client.subscribe("homeassistant/status")
+            client.subscribe(f"{DISCOVERY_PREFIX}/status")
             client.publish(self._topic("bridge", "status"), "online", retain=True)
             self.publish_discovery()
+            self._start_orphan_scan()
             log.info(f"MQTT connected to {MQTT_HOST}:{MQTT_PORT}")
         else:
             log.error(f"MQTT connect failed code: {rc}")
@@ -750,27 +797,36 @@ class Bridge:
         try:
             payload = (msg.payload.decode() if msg.payload else "").strip()
             topic = msg.topic
-            parts = topic.split("/")
 
-            if "/".join(parts[-2:]) == "all/command":
+            if topic.startswith(DISCOVERY_PREFIX + "/") and topic.endswith("/config"):
+                self._note_discovery_config(topic, payload)
+                return
+
+            if topic == f"{DISCOVERY_PREFIX}/status":
+                if payload == "online":
+                    self.publish_discovery()
+                return
+
+            if not topic.startswith(MQTT_BASE + "/"):
+                return
+            # parts relative to the base topic: <amp>/zone/<n>/set/<cmd>, <amp>/raw, all/command
+            parts = topic[len(MQTT_BASE) + 1:].split("/")
+
+            if parts == ["all", "command"]:
                 log.info(f"Received master command: {payload}")
                 if payload.upper() == "OFF":
                     for s in self.sessions.values():
                         s.all_zones_off_optimistic()
                     for amp_key, s in self.sessions.items():
-                        for z in range(1, 9):
+                        for z in range(1, ZONES_PER_AMP + 1):
                             base_t = s._topic("zone", z)
                             client.publish(f"{base_t}/power", "off", retain=True)
                             client.publish(f"{base_t}/mute", "off", retain=True)
                     log.info("Sent ALL OFF command and optimistically set all zones to OFF")
                 return
 
-            if topic == "homeassistant/status" and payload == "online":
-                self.publish_discovery()
-                return
-
-            if parts[-1] == "raw":
-                sess = self.sessions.get(parts[-2])
+            if len(parts) == 2 and parts[1] == "raw":
+                sess = self.sessions.get(parts[0])
                 if sess:
                     with sess.lock:
                         if not sess.connected and not sess._connect():
@@ -778,12 +834,12 @@ class Bridge:
                         sess._send_ascii(payload)
                         time.sleep(POST_SEND_SETTLE)
                         line = sess._readline(PER_CMD_TIMEOUT)
-                        client.publish(self._topic(parts[-2], "ack", "raw"), line or "", retain=False)
+                        client.publish(self._topic(parts[0], "ack", "raw"), line or "", retain=False)
                 return
 
-            if len(parts) < 7 or parts[3] != "zone" or parts[5] != "set":
+            if len(parts) != 5 or parts[1] != "zone" or parts[3] != "set":
                 return
-            amp, zone_str, cmd = parts[2], parts[4], parts[6].lower()
+            amp, zone_str, cmd = parts[0], parts[2], parts[4].lower()
             try:
                 zone = int(zone_str)
             except ValueError:
@@ -806,7 +862,11 @@ class Bridge:
             elif cmd == "toggle_mute":
                 ok = sess.toggle_mute(zone)
             elif cmd == "source":
-                ok = sess.set_source(zone, int(payload))
+                src = SETTINGS.amp(amp).source_number(payload)
+                if src is None:
+                    log.warning(f"[{amp}] Unknown source '{payload}' for zone {zone}")
+                else:
+                    ok = sess.set_source(zone, src)
             elif cmd == "volume":
                 ok = sess.set_volume(zone, int(payload))
             elif cmd == "bass":
@@ -833,6 +893,16 @@ class Bridge:
 
 
 def main():
+    try:
+        cfg = settings_mod.load()
+    except ConfigError as e:
+        log.error(f"Config error: {e}")
+        sys.exit(2)
+    apply_settings(cfg)
+    log.info(f"RTI bridge {__version__} starting - config {cfg.path}, "
+             f"{len(cfg.amps)} amp(s): {', '.join(a.id + '@' + a.host for a in cfg.amps) or 'none'}")
+    log.info(f"MQTT broker {MQTT_HOST}:{MQTT_PORT} user={MQTT_USER or '(none)'} "
+             f"password={'set' if MQTT_PASS else 'not set'}")
     bridge = Bridge()
 
     def _graceful(sig, frame):
