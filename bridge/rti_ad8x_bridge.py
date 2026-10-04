@@ -11,6 +11,7 @@ Version 1.8.2
   1.9.1: Docker image (dependencies baked in at build time)
   1.9.2: compose pull_policy: build so redeploys pick up new commits
   1.9.3: telnet TX logged at DEBUG; one INFO line per incoming command; optional amp names
+  2.0.0: web UI (status, zone control, config editor, logs) on port 8088
 """
 import os
 import sys
@@ -38,7 +39,28 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("rti_ad8x_bridge")
-__version__ = "1.9.3"
+
+
+class _RingHandler(logging.Handler):
+    """Keeps the last N formatted log lines for the web UI's Logs tab."""
+    def __init__(self, size: int = 1000):
+        super().__init__()
+        import collections
+        self.lines = collections.deque(maxlen=size)
+        self.seq = 0
+
+    def emit(self, record):
+        try:
+            self.seq += 1
+            self.lines.append((self.seq, record.levelname, self.format(record)))
+        except Exception:
+            pass
+
+
+LOG_BUFFER = _RingHandler()
+LOG_BUFFER.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
+logging.getLogger().addHandler(LOG_BUFFER)
+__version__ = "2.0.0"
 
 
 # CONFIG - populated from config.yaml by apply_settings() at startup
@@ -166,6 +188,7 @@ class AmpSession(threading.Thread):
         self._zone_states: dict[int, dict] = {}
         self._consecutive_failures = 0
         self._is_down_published = False
+        self.last_poll_ok: Optional[float] = None
 
     def _cleanup_socket(self):
         try:
@@ -542,6 +565,7 @@ class AmpSession(threading.Thread):
                 return False
 
     def _handle_poll_success(self):
+        self.last_poll_ok = time.time()
         if self._consecutive_failures > 0:
             log.info(f"[{self.amp_name}] Amp communication restored.")
         self._consecutive_failures = 0
@@ -796,6 +820,101 @@ class Bridge:
         else:
             log.error(f"MQTT connect failed code: {rc}")
 
+    # ---- commands (shared by MQTT and the web UI) ---------------------
+    def all_off(self):
+        for s in self.sessions.values():
+            s.all_zones_off_optimistic()
+        for amp_key, s in self.sessions.items():
+            for z in range(1, ZONES_PER_AMP + 1):
+                base_t = s._topic("zone", z)
+                self.client.publish(f"{base_t}/power", "off", retain=True)
+                self.client.publish(f"{base_t}/mute", "off", retain=True)
+                s._zone_states.setdefault(z, {})["power"] = False
+        log.info("Sent ALL OFF command and optimistically set all zones to OFF")
+
+    def send_raw(self, amp: str, payload: str) -> Optional[str]:
+        sess = self.sessions.get(amp)
+        if not sess:
+            return None
+        with sess.lock:
+            if not sess.connected and not sess._connect():
+                return None
+            log.info(f"[{amp}] raw <- '{payload}'")
+            sess._send_ascii(payload)
+            time.sleep(POST_SEND_SETTLE)
+            return sess._readline(PER_CMD_TIMEOUT) or ""
+
+    def zone_command(self, amp: str, zone: int, cmd: str, payload: str) -> bool:
+        sess = self.sessions.get(amp)
+        if not sess or not 1 <= zone <= ZONES_PER_AMP:
+            return False
+        payload = str(payload).strip()
+        try:
+            if cmd == "power":
+                if payload.lower() in ("1", "on", "true"):
+                    last_vol = sess._zone_states.get(zone, {}).get("vol_0_75", 65)
+                    log.info(f"[{amp}] Power ON for zone {zone} received. Setting volume to {last_vol} to power on.")
+                    return sess.set_volume(zone, last_vol)
+                return sess.set_power(zone, False)
+            if cmd == "mute":
+                return sess.set_mute(zone, payload.lower() in ("1", "on", "true"))
+            if cmd == "toggle_mute":
+                return sess.toggle_mute(zone)
+            if cmd == "source":
+                src = SETTINGS.amp(amp).source_number(payload)
+                if src is None:
+                    log.warning(f"[{amp}] Unknown source '{payload}' for zone {zone}")
+                    return False
+                return sess.set_source(zone, src)
+            if cmd == "volume":
+                return sess.set_volume(zone, int(payload))
+            if cmd == "bass":
+                return sess.set_bass(zone, int(payload))
+            if cmd == "treble":
+                return sess.set_treble(zone, int(payload))
+            simple = {
+                "volume_up": sess.volume_up, "volume_down": sess.volume_down,
+                "bass_up": sess.bass_up, "bass_down": sess.bass_down,
+                "treble_up": sess.treble_up, "treble_down": sess.treble_down,
+            }
+            if cmd in simple:
+                return simple[cmd](zone)
+        except ValueError:
+            log.warning(f"[{amp}] Bad value '{payload}' for {cmd} on zone {zone}")
+        return False
+
+    def snapshot(self) -> dict:
+        """Current state for the web UI."""
+        amps = []
+        for amp in SETTINGS.amps:
+            sess = self.sessions.get(amp.id)
+            zones = []
+            for z in range(1, ZONES_PER_AMP + 1):
+                st = dict(sess._zone_states.get(z, {})) if sess else {}
+                zones.append({
+                    "n": z, "name": amp.zones[z].name, "id": amp.zones[z].id,
+                    "power": st.get("power"), "mute": st.get("mute"),
+                    "source": st.get("source"),
+                    "source_label": amp.source_label(st["source"]) if st.get("source") else None,
+                    "vol_0_75": st.get("vol_0_75"), "bass": st.get("bass"), "treble": st.get("treble"),
+                })
+            amps.append({
+                "id": amp.id, "name": amp.device_name, "host": amp.host, "port": amp.port,
+                "connected": bool(sess and sess.connected),
+                "failures": sess._consecutive_failures if sess else 0,
+                "last_poll_ok": sess.last_poll_ok if sess else None,
+                "source_options": amp.source_options,
+                "zones": zones,
+            })
+        return {
+            "version": __version__,
+            "uptime_s": int(time.monotonic() - self._start_time),
+            "config_path": SETTINGS.path,
+            "mqtt": {"host": MQTT_HOST, "port": MQTT_PORT, "connected": self.client.is_connected()},
+            "poll_interval_sec": POLL_INTERVAL_SEC,
+            "amps": amps,
+        }
+
     def on_message(self, client, userdata, msg):
         try:
             payload = (msg.payload.decode() if msg.payload else "").strip()
@@ -818,27 +937,13 @@ class Bridge:
             if parts == ["all", "command"]:
                 log.info(f"Received master command: {payload}")
                 if payload.upper() == "OFF":
-                    for s in self.sessions.values():
-                        s.all_zones_off_optimistic()
-                    for amp_key, s in self.sessions.items():
-                        for z in range(1, ZONES_PER_AMP + 1):
-                            base_t = s._topic("zone", z)
-                            client.publish(f"{base_t}/power", "off", retain=True)
-                            client.publish(f"{base_t}/mute", "off", retain=True)
-                    log.info("Sent ALL OFF command and optimistically set all zones to OFF")
+                    self.all_off()
                 return
 
             if len(parts) == 2 and parts[1] == "raw":
-                sess = self.sessions.get(parts[0])
-                if sess:
-                    with sess.lock:
-                        if not sess.connected and not sess._connect():
-                            return
-                        log.info(f"[{parts[0]}] raw <- '{payload}'")
-                        sess._send_ascii(payload)
-                        time.sleep(POST_SEND_SETTLE)
-                        line = sess._readline(PER_CMD_TIMEOUT)
-                        client.publish(self._topic(parts[0], "ack", "raw"), line or "", retain=False)
+                line = self.send_raw(parts[0], payload)
+                if line is not None:
+                    client.publish(self._topic(parts[0], "ack", "raw"), line, retain=False)
                 return
 
             if len(parts) != 5 or parts[1] != "zone" or parts[3] != "set":
@@ -849,60 +954,36 @@ class Bridge:
                 zone = int(zone_str)
             except ValueError:
                 return
-            sess = self.sessions.get(amp)
-            if not sess:
-                return
-
-            ok = False
-            if cmd == "power":
-                is_on = payload.lower() in ("1", "on", "true")
-                if is_on:
-                    last_vol = sess._zone_states.get(zone, {}).get("vol_0_75", 65)
-                    log.info(f"[{amp}] Power ON for zone {zone} received. Setting volume to {last_vol} to power on.")
-                    ok = sess.set_volume(zone, last_vol)
-                else:
-                    ok = sess.set_power(zone, False)
-            elif cmd == "mute":
-                ok = sess.set_mute(zone, payload.lower() in ("1", "on", "true"))
-            elif cmd == "toggle_mute":
-                ok = sess.toggle_mute(zone)
-            elif cmd == "source":
-                src = SETTINGS.amp(amp).source_number(payload)
-                if src is None:
-                    log.warning(f"[{amp}] Unknown source '{payload}' for zone {zone}")
-                else:
-                    ok = sess.set_source(zone, src)
-            elif cmd == "volume":
-                ok = sess.set_volume(zone, int(payload))
-            elif cmd == "bass":
-                ok = sess.set_bass(zone, int(payload))
-            elif cmd == "treble":
-                ok = sess.set_treble(zone, int(payload))
-            elif cmd == "volume_up":
-                ok = sess.volume_up(zone)
-            elif cmd == "volume_down":
-                ok = sess.volume_down(zone)
-            elif cmd == "bass_up":
-                ok = sess.bass_up(zone)
-            elif cmd == "bass_down":
-                ok = sess.bass_down(zone)
-            elif cmd == "treble_up":
-                ok = sess.treble_up(zone)
-            elif cmd == "treble_down":
-                ok = sess.treble_down(zone)
-
+            ok = self.zone_command(amp, zone, cmd, payload)
             client.publish(self._topic(amp, "zone", "ack", cmd), "ok" if ok else "err", retain=False)
 
         except Exception:
             traceback.print_exc()
 
 
+def _restart_process():
+    log.info("Restarting bridge process...")
+    logging.shutdown()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 def main():
+    import web  # local module
+
+    restart = threading.Event()
     try:
         cfg = settings_mod.load()
     except ConfigError as e:
+        # Keep the web UI up so the config can be fixed from the browser.
         log.error(f"Config error: {e}")
-        sys.exit(2)
+        server = web.start_server(None, restart, LOG_BUFFER, config_error=str(e))
+        if not server:
+            sys.exit(2)
+        log.error("Bridge NOT running - fix config.yaml in the web UI (Config tab) or on disk.")
+        restart.wait()
+        _restart_process()
+        return
+
     apply_settings(cfg)
     log.info(f"RTI bridge {__version__} starting - config {cfg.path}, "
              f"{len(cfg.amps)} amp(s): {', '.join(a.id + '@' + a.host for a in cfg.amps) or 'none'}")
@@ -918,16 +999,18 @@ def main():
     signal.signal(signal.SIGINT, _graceful)
     signal.signal(signal.SIGTERM, _graceful)
 
+    bridge.start()
+    web.start_server(bridge, restart, LOG_BUFFER, cfg.web)
     try:
-        bridge.start()
-        while True:
+        while not restart.is_set():
             now = time.monotonic()
             if (now - bridge._last_diag_pub_time) > HEALTH_CHECK_INTERVAL:
                 bridge.publish_diagnostics()
                 bridge._last_diag_pub_time = now
-            time.sleep(1.0)
+            restart.wait(1.0)
     finally:
         bridge.stop()
+    _restart_process()
 
 
 if __name__ == "__main__":

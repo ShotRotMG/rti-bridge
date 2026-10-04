@@ -18,6 +18,11 @@ discovery:
 logging:
   level: INFO                  # DEBUG also dumps raw telnet bytes
 
+web:
+  enabled: true
+  port: 8088                   # http://<docker-host>:8088/
+  password: ""                 # optional; browser asks for it (any username). Or set WEB_PASSWORD.
+
 timing:
   poll_interval_sec: 20        # full 8-zone poll per amp
   # connect_timeout_sec: 6

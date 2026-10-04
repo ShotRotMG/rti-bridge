@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RTI Bridge</title>
+<style>
+:root {
+  --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --line: #2a2f3a;
+  --text: #e6e8ec; --muted: #8b93a3; --accent: #4f9cf7; --accent-ink: #0b1220;
+  --ok: #3ecf8e; --warn: #f5b84a; --bad: #f2555a; --off: #3a404c;
+  --radius: 10px; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+header { position: sticky; top: 0; z-index: 5; background: rgba(15,17,21,.92); backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--line); }
+.bar { max-width: 1280px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.brand { font-weight: 650; letter-spacing: .2px; }
+.brand small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--panel2); color: var(--muted); border: 1px solid var(--line); white-space: nowrap; }
+.chip.ok { color: var(--ok); border-color: rgba(62,207,142,.35); }
+.chip.bad { color: var(--bad); border-color: rgba(242,85,90,.35); }
+.chip.warn { color: var(--warn); border-color: rgba(245,184,74,.35); }
+.spacer { flex: 1; }
+nav { display: flex; gap: 4px; }
+nav button { background: none; border: 0; padding: 6px 12px; border-radius: 8px; color: var(--muted); cursor: pointer; }
+nav button.active { background: var(--panel2); color: var(--text); }
+main { max-width: 1280px; margin: 0 auto; padding: 16px; }
+.btn { white-space: nowrap; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+.btn:hover { border-color: #3a4150; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.btn.danger { color: var(--bad); }
+.btn:disabled { opacity: .45; cursor: default; }
+.banner { padding: 10px 14px; border-radius: var(--radius); margin-bottom: 14px; border: 1px solid; }
+.banner.bad { background: rgba(242,85,90,.08); border-color: rgba(242,85,90,.35); }
+.banner.ok { background: rgba(62,207,142,.08); border-color: rgba(62,207,142,.35); }
+.banner.info { background: rgba(79,156,247,.08); border-color: rgba(79,156,247,.35); }
+.hidden { display: none !important; }
+
+/* status */
+.amp { margin-bottom: 22px; }
+.amp-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.amp-head h2 { margin: 0; font-size: 17px; }
+.amp-head .meta { color: var(--muted); font-size: 12px; }
+.zones { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.zone { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; display: grid; gap: 10px; }
+.zone.on { border-color: rgba(79,156,247,.45); }
+.zone-top { display: flex; align-items: center; gap: 8px; }
+.zone-top .name { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.zone-top .num { color: var(--muted); font-size: 12px; }
+.toggle { border: 1px solid var(--line); background: var(--off); border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer; min-width: 52px; }
+.toggle.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.toggle.mute.on { background: var(--warn); border-color: var(--warn); }
+.row { display: flex; align-items: center; gap: 8px; }
+.row label { color: var(--muted); font-size: 12px; width: 52px; flex: none; }
+.row select { flex: 1; min-width: 0; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
+.row input[type=range] { flex: 1; accent-color: var(--accent); min-width: 0; }
+.row .val { width: 30px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.tone { display: flex; gap: 14px; }
+.step { display: flex; align-items: center; gap: 4px; }
+.step span.l { color: var(--muted); font-size: 12px; margin-right: 2px; }
+.step button { width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel2); cursor: pointer; line-height: 1; }
+.step .v { min-width: 26px; text-align: center; font-variant-numeric: tabular-nums; }
+.zone.disabled .needs-power { opacity: .4; pointer-events: none; }
+.unknown { color: var(--muted); font-size: 12px; }
+
+/* config */
+.seg { display: inline-flex; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 2px; margin-bottom: 14px; }
+.seg button { border: 0; background: none; padding: 5px 12px; border-radius: 6px; cursor: pointer; color: var(--muted); }
+.seg button.active { background: var(--panel); color: var(--text); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; margin-bottom: 14px; }
+.card h3 { margin: 0 0 12px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+.card h3 .btn { font-size: 13px; font-weight: 500; padding: 4px 10px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px 14px; align-items: start; }
+.field { display: grid; gap: 4px; }
+.field > span { color: var(--muted); font-size: 12px; }
+.field input, .field select { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; width: 100%; }
+.field input[readonly] { color: var(--muted); }
+.field.check { display: flex; align-items: center; gap: 8px; padding-top: 22px; }
+.field.check input { width: auto; }
+.field.check span { color: var(--text); font-size: 13px; }
+.hint { color: var(--muted); font-size: 12px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td input { width: 100%; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
+td input[readonly] { color: var(--muted); }
+td.n { width: 28px; color: var(--muted); }
+.two { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-top: 12px; }
+@media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
+.actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; position: sticky; bottom: 0; background: var(--bg); padding: 10px 0; border-top: 1px solid var(--line); }
+textarea.yaml { width: 100%; min-height: 60vh; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; font: 13px/1.5 var(--mono); tab-size: 2; resize: vertical; }
+.msg { font-size: 13px; }
+.msg.ok { color: var(--ok); } .msg.bad { color: var(--bad); white-space: pre-wrap; }
+
+/* logs */
+.logbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+#logfilter { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; min-width: 200px; }
+pre.logs { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; height: 70vh; overflow: auto; margin: 0; font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; }
+.l-WARNING { color: var(--warn); } .l-ERROR, .l-CRITICAL { color: var(--bad); } .l-DEBUG { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand">RTI Bridge <small id="ver"></small></div>
+    <div class="chips" id="chips"></div>
+    <div class="spacer"></div>
+    <nav>
+      <button data-tab="status" class="active">Status</button>
+      <button data-tab="config">Config</button>
+      <button data-tab="logs">Logs</button>
+    </nav>
+  </div>
+</header>
+<main>
+  <div id="banner"></div>
+
+  <section id="tab-status">
+    <div class="row" style="margin-bottom:14px; gap:8px">
+      <button class="btn danger" id="alloff">All zones off</button>
+      <button class="btn" id="restart">Restart bridge</button>
+      <span class="hint" id="pollinfo"></span>
+    </div>
+    <div id="amps"></div>
+  </section>
+
+  <section id="tab-config" class="hidden">
+    <div class="seg"><button data-mode="form" class="active">Form</button><button data-mode="yaml">YAML</button></div>
+    <div id="cfg-form"></div>
+    <div id="cfg-yaml" class="hidden">
+      <div class="hint" id="cfgpath" style="margin-bottom:8px"></div>
+      <textarea class="yaml" id="yaml" spellcheck="false"></textarea>
+    </div>
+    <div class="actions">
+      <button class="btn primary" id="save">Save &amp; apply</button>
+      <button class="btn" id="validate">Validate</button>
+      <button class="btn" id="reload">Discard changes</button>
+      <span class="msg" id="cfgmsg"></span>
+    </div>
+  </section>
+
+  <section id="tab-logs" class="hidden">
+    <div class="logbar">
+      <input id="logfilter" placeholder="Filter (e.g. amp1, WARNING)">
+      <label class="hint" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="logfollow" checked> Follow</label>
+      <button class="btn" id="logclear">Clear view</button>
+    </div>
+    <pre class="logs" id="logs"></pre>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "value") el.value = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) el.append(k.nodeType ? k : String(k));
+  return el;
+}
+async function api(path, body) {
+  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  if (!r.ok && r.status !== 200) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json();
+}
+const fmtDur = s => { s = Math.max(0, Math.round(s)); const d = Math.floor(s/86400), hh = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
+  return d ? `${d}d ${hh}h` : hh ? `${hh}h ${m}m` : m ? `${m}m ${s%60}s` : `${s}s`; };
+
+/* ---------------- tabs ---------------- */
+let tab = "status";
+$$("nav button").forEach(b => b.onclick = () => {
+  tab = b.dataset.tab;
+  $$("nav button").forEach(x => x.classList.toggle("active", x === b));
+  ["status", "config", "logs"].forEach(t => $("#tab-" + t).classList.toggle("hidden", t !== tab));
+  if (tab === "config" && !cfgLoaded) loadConfig();
+  if (tab === "logs") pollLogs();
+});
+
+/* ---------------- status ---------------- */
+let status = null;
+const busyUntil = {};               // control key -> timestamp; don't overwrite while user is adjusting
+const busy = k => (busyUntil[k] || 0) > Date.now();
+const hold = (k, ms = 3500) => busyUntil[k] = Date.now() + ms;
+
+async function cmd(amp, zone, c, value, key) {
+  if (key) hold(key);
+  try {
+    const r = await api("/api/zone", { amp, zone, cmd: c, value: String(value ?? "") });
+    if (!r.ok) flash(`${amp} zone ${zone}: ${c} was rejected (zone off or amp offline?)`, "bad");
+  } catch (e) { flash("Command failed: " + e.message, "bad"); }
+  setTimeout(pollStatus, 400);
+}
+
+function renderChips(s) {
+  const c = $("#chips"); c.replaceChildren();
+  if (!s) return;
+  if (!s.bridge_running) { c.append(h("span", { class: "chip bad" }, "bridge stopped")); return; }
+  c.append(h("span", { class: "chip " + (s.mqtt.connected ? "ok" : "bad") }, `MQTT ${s.mqtt.connected ? "connected" : "disconnected"}`));
+  const on = s.amps.filter(a => a.connected).length;
+  c.append(h("span", { class: "chip " + (on === s.amps.length ? "ok" : on ? "warn" : "bad") }, `${on}/${s.amps.length} amps online`));
+  c.append(h("span", { class: "chip" }, `up ${fmtDur(s.uptime_s)}`));
+}
+
+function zoneCard(amp, z, opts) {
+  const key = `${amp.id}:${z.n}`;
+  const known = z.power !== null && z.power !== undefined;
+  const on = !!z.power;
+  const level = z.vol_0_75 == null ? 0 : 75 - z.vol_0_75;
+  const card = h("div", { class: `zone${on ? " on" : ""}${known && !on ? " disabled" : ""}`, "data-key": key });
+
+  const vol = h("input", { type: "range", min: 0, max: 75, step: 1, value: level, "aria-label": `${z.name} volume` });
+  const volVal = h("span", { class: "val" }, z.vol_0_75 == null ? "–" : level);
+  vol.addEventListener("input", () => { volVal.textContent = vol.value; hold(key + ":vol"); });
+  vol.addEventListener("change", () => cmd(amp.id, z.n, "volume", 75 - Number(vol.value), key + ":vol"));
+
+  const src = h("select", { "aria-label": `${z.name} source`, onchange: e => cmd(amp.id, z.n, "source", e.target.value, key + ":src") },
+    !z.source ? h("option", { value: "" }, "–") : null,
+    opts.map(o => h("option", { value: o, selected: o === z.source_label }, o)));
+
+  const stepper = (label, c, v) => h("div", { class: "step" },
+    h("span", { class: "l" }, label),
+    h("button", { title: `${label} down`, onclick: () => cmd(amp.id, z.n, c + "_down", "", key + ":" + c) }, "−"),
+    h("span", { class: "v" }, v == null ? "–" : (v > 0 ? "+" : "") + v),
+    h("button", { title: `${label} up`, onclick: () => cmd(amp.id, z.n, c + "_up", "", key + ":" + c) }, "+"));
+
+  card.append(...[
+    h("div", { class: "zone-top" },
+      h("span", { class: "num" }, z.n),
+      h("span", { class: "name", title: `${z.name} (${z.id})` }, z.name),
+      h("button", { class: "toggle mute needs-power" + (z.mute ? " on" : ""), title: "Mute",
+        onclick: () => cmd(amp.id, z.n, "mute", z.mute ? "off" : "on", key + ":mute") }, z.mute ? "Muted" : "Mute"),
+      h("button", { class: "toggle" + (on ? " on" : ""), title: "Power",
+        onclick: () => cmd(amp.id, z.n, "power", on ? "off" : "on", key + ":pwr") }, on ? "On" : "Off")),
+    h("div", { class: "row needs-power" }, h("label", {}, "Source"), src),
+    h("div", { class: "row needs-power" }, h("label", {}, "Volume"), vol, volVal),
+    h("div", { class: "tone needs-power" }, stepper("Bass", "bass", z.bass), stepper("Treble", "treble", z.treble)),
+    known ? null : h("div", { class: "unknown" }, "No state yet - waiting for first poll")].filter(Boolean));
+  return card;
+}
+
+function renderStatus(s) {
+  const wrap = $("#amps");
+  if (!s.bridge_running) { wrap.replaceChildren(); return; }
+  $("#pollinfo").textContent = `Amps polled every ${s.poll_interval_sec}s · page refreshes every 3s`;
+  // keep cards the user is touching; rebuild the rest
+  const frag = document.createDocumentFragment();
+  for (const amp of s.amps) {
+    const last = amp.last_poll_ok ? `last poll ${fmtDur(Date.now()/1000 - amp.last_poll_ok)} ago` : "no successful poll yet";
+    const sec = h("section", { class: "amp" },
+      h("div", { class: "amp-head" },
+        h("h2", {}, amp.name),
+        h("span", { class: "chip " + (amp.connected ? "ok" : "bad") }, amp.connected ? "online" : "offline"),
+        h("span", { class: "meta" }, `${amp.id} · ${amp.host}:${amp.port} · ${last}${amp.failures ? ` · ${amp.failures} failed polls` : ""}`)),
+      h("div", { class: "zones" }));
+    const grid = $(".zones", sec);
+    for (const z of amp.zones) {
+      const key = `${amp.id}:${z.n}`;
+      const existing = wrap.querySelector(`.zone[data-key="${CSS.escape(key)}"]`);
+      const touching = Object.keys(busyUntil).some(k => k.startsWith(key + ":") && busy(k)) ||
+        (existing && existing.contains(document.activeElement) && document.activeElement.tagName === "SELECT");
+      grid.append(touching && existing ? existing : zoneCard(amp, z, amp.source_options));
+    }
+    frag.append(sec);
+  }
+  wrap.replaceChildren(frag);
+}
+
+let bridgeWasDown = false;
+async function pollStatus() {
+  try {
+    const s = await api("/api/status");
+    status = s;
+    $("#ver").textContent = s.version ? "v" + s.version : "";
+    renderChips(s);
+    const b = $("#banner");
+    if (!s.bridge_running) {
+      b.replaceChildren(h("div", { class: "banner bad" },
+        h("strong", {}, "Bridge not running: "), s.config_error || "unknown error",
+        h("div", { class: "hint" }, `Fix ${s.config_path} on the Config tab, then Save & apply.`)));
+    } else if (bridgeWasDown || b.dataset.flash !== "1") {
+      b.replaceChildren(); b.dataset.flash = "";
+    }
+    bridgeWasDown = !s.bridge_running;
+    if (tab === "status") renderStatus(s);
+  } catch (e) {
+    renderChips(null);
+    $("#chips").append(h("span", { class: "chip bad" }, "bridge unreachable"));
+  }
+}
+function flash(text, kind = "info") {
+  const b = $("#banner"); b.dataset.flash = "1";
+  b.replaceChildren(h("div", { class: "banner " + kind }, text));
+  setTimeout(() => { if (b.dataset.flash === "1") { b.replaceChildren(); b.dataset.flash = ""; } }, 5000);
+}
+
+$("#alloff").onclick = async () => {
+  if (!confirm("Turn off every zone on every amp?")) return;
+  await api("/api/all_off", {}); setTimeout(pollStatus, 500);
+};
+$("#restart").onclick = async () => {
+  if (!confirm("Restart the bridge? Zones keep playing; control drops for a few seconds.")) return;
+  await api("/api/restart", {}); waitForRestart("Restarting bridge…");
+};
+
+async function waitForRestart(text) {
+  flash(text, "info");
+  const before = Date.now();
+  await new Promise(r => setTimeout(r, 1500));
+  for (let i = 0; i < 40; i++) {
+    try { const s = await api("/api/status"); if (s && (s.uptime_s ?? 0) < (Date.now() - before) / 1000 + 5) { location.reload(); return; } } catch (e) {}
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  flash("Bridge didn't come back after 40s - check the container logs.", "bad");
+}
+
+/* ---------------- config ---------------- */
+let cfgLoaded = false, mode = "form", form = null, dirty = false;
+$$(".seg button").forEach(b => b.onclick = async () => {
+  if (dirty && !confirm("Switch view and discard unsaved changes?")) return;
+  mode = b.dataset.mode;
+  $$(".seg button").forEach(x => x.classList.toggle("active", x === b));
+  $("#cfg-form").classList.toggle("hidden", mode !== "form");
+  $("#cfg-yaml").classList.toggle("hidden", mode !== "yaml");
+  $("#validate").classList.toggle("hidden", mode !== "yaml");
+  await loadConfig();
+});
+$("#validate").classList.add("hidden");
+const setMsg = (t, k = "") => { const m = $("#cfgmsg"); m.textContent = t; m.className = "msg " + k; };
+const markDirty = () => { dirty = true; setMsg("Unsaved changes"); };
+
+async function loadConfig() {
+  dirty = false; setMsg("");
+  const raw = await api("/api/config/raw");
+  $("#yaml").value = raw.text; $("#cfgpath").textContent = raw.path;
+  const f = await api("/api/config/form");
+  if (!f.ok) {
+    form = null;
+    $("#cfg-form").replaceChildren(h("div", { class: "banner bad" }, "The form can't load this config: " + f.error,
+      h("div", { class: "hint" }, "Fix it in the YAML view.")));
+  } else { form = f.form; renderForm(); }
+  cfgLoaded = true;
+}
+$("#yaml").addEventListener("input", markDirty);
+
+function inp(obj, key, attrs = {}) {
+  return h("input", { value: obj[key] ?? "", ...attrs, oninput: e => { obj[key] = attrs.type === "number" ? Number(e.target.value) : e.target.value; markDirty(); } });
+}
+function field(label, input, hint) { return h("label", { class: "field" }, h("span", {}, label), input, hint ? h("span", { class: "hint" }, hint) : null); }
+
+function renderForm() {
+  const f = form, root = $("#cfg-form");
+  f._new = f._new || new Set();
+  const envNote = f.env_overrides.length
+    ? h("div", { class: "banner info" }, "Set in the container environment, overriding this file: ", f.env_overrides.join(", ")) : null;
+
+  const pw = h("input", { type: "password", autocomplete: "new-password",
+    placeholder: f.mqtt_has_password ? "set in file – leave blank to keep" : "not set in file",
+    oninput: e => { f.mqtt_password = e.target.value; markDirty(); } });
+  const webpw = h("input", { type: "password", autocomplete: "new-password",
+    placeholder: f.web_has_password ? "set – leave blank to keep" : "none (page is open on the LAN)",
+    oninput: e => { f.web_password = e.target.value; markDirty(); } });
+  const lvl = h("select", { onchange: e => { f.log_level = e.target.value; markDirty(); } },
+    ["DEBUG", "INFO", "WARNING", "ERROR"].map(l => h("option", { selected: l === f.log_level }, l)));
+  const cleanup = h("input", { type: "checkbox", checked: f.cleanup_orphans, onchange: e => { f.cleanup_orphans = e.target.checked; markDirty(); } });
+
+  const general = h("div", { class: "card" }, h("h3", {}, "MQTT & bridge"),
+    h("div", { class: "grid" },
+      field("Broker host", inp(f.mqtt, "host")),
+      field("Port", inp(f.mqtt, "port", { type: "number" })),
+      field("Username", inp(f.mqtt, "user")),
+      field("Password", pw),
+      field("Base topic", inp(f.mqtt, "base_topic"), "changing this moves every topic"),
+      field("Discovery prefix", inp(f.mqtt, "discovery_prefix")),
+      field("Poll interval (s)", inp(f, "poll_interval_sec", { type: "number", min: 2, step: 1 })),
+      field("Log level", lvl),
+      field("Web UI port", inp(f, "web_port", { type: "number" })),
+      field("Web UI password", webpw),
+      h("label", { class: "field check" }, cleanup, h("span", {}, "Remove orphaned HA entities on startup"))));
+
+  const amps = f.amps.map((a, i) => ampCard(a, i));
+  const add = h("button", { class: "btn", onclick: () => {
+    const n = f.amps.length + 1;
+    let id = "amp" + n; while (f.amps.some(a => a.id === id)) id += "_";
+    const zones = {}, sources = {};
+    for (let z = 1; z <= 8; z++) { zones[z] = { name: `Zone ${z}`, id: "" }; sources[z] = ""; }
+    f.amps.push({ id, name: "", host: "", port: 23, zones, sources }); f._new.add(id);
+    markDirty(); renderForm();
+  } }, "+ Add amp");
+
+  root.replaceChildren(...[envNote, general, ...amps, add].filter(Boolean));
+}
+
+function ampCard(a, i) {
+  const f = form, isNew = f._new.has(a.id);
+  const idInput = h("input", { value: a.id, readonly: !isNew,
+    oninput: e => { f._new.delete(a.id); a.id = e.target.value.trim(); f._new.add(a.id); markDirty(); } });
+  const zones = h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Zone name"), h("th", {}, "Entity id"))),
+    h("tbody", {}, Object.keys(a.zones).map(n => {
+      const z = a.zones[n];
+      return h("tr", {}, h("td", { class: "n" }, n),
+        h("td", {}, inp(z, "name")),
+        h("td", {}, h("input", { value: z.id, readonly: !isNew, placeholder: "from name",
+          title: isNew ? "Leave blank to derive from the name" : "Pinned so renames keep the same HA entity",
+          oninput: e => { z.id = e.target.value.trim(); markDirty(); } })));
+    })));
+  const sources = h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Source label (blank = number)"))),
+    h("tbody", {}, Object.keys(a.sources).map(n => h("tr", {}, h("td", { class: "n" }, n),
+      h("td", {}, inp(a.sources, n, { placeholder: n }))))));
+  return h("div", { class: "card" },
+    h("h3", {}, a.name || a.id, h("span", { class: "spacer" }),
+      h("button", { class: "btn danger", onclick: () => {
+        if (!confirm(`Remove ${a.id}? Its Home Assistant entities will be removed on restart (if orphan cleanup is on).`)) return;
+        f.amps.splice(i, 1); markDirty(); renderForm(); } }, "Remove amp")),
+    h("div", { class: "grid" },
+      field("Id", idInput, isNew ? "a-z, 0-9, _ – used in topics, can't change later" : "fixed – used in topics and entity ids"),
+      field("Display name", inp(a, "name", { placeholder: `RTI AD-8x (${a.id})` })),
+      field("Host / IP", inp(a, "host", { placeholder: "192.168.1.x" })),
+      field("Telnet port", inp(a, "port", { type: "number" }))),
+    h("div", { class: "two" }, zones, sources));
+}
+
+async function save() {
+  setMsg("Saving…");
+  try {
+    let r;
+    if (mode === "yaml") r = await api("/api/config/raw", { text: $("#yaml").value });
+    else {
+      const body = { ...form }; delete body._new;
+      if (!body.mqtt_password) delete body.mqtt_password;
+      if (!body.web_password) delete body.web_password;
+      r = await api("/api/config/form", body);
+    }
+    if (!r.ok) return setMsg(r.error, "bad");
+    dirty = false; setMsg("Saved – restarting bridge…", "ok");
+    waitForRestart("Config saved. Restarting bridge…");
+  } catch (e) { setMsg("Save failed: " + e.message, "bad"); }
+}
+$("#save").onclick = save;
+$("#validate").onclick = async () => {
+  const r = await api("/api/config/validate", { text: $("#yaml").value });
+  setMsg(r.ok ? "Valid" : r.error, r.ok ? "ok" : "bad");
+};
+$("#reload").onclick = () => { if (!dirty || confirm("Discard unsaved changes?")) loadConfig(); };
+window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+/* ---------------- logs ---------------- */
+let logSeq = 0, logLines = [];
+async function pollLogs() {
+  try {
+    const r = await api("/api/logs?after=" + logSeq);
+    if (r.lines.length) { logSeq = r.lines[r.lines.length - 1].seq; logLines.push(...r.lines); logLines = logLines.slice(-2000); renderLogs(); }
+  } catch (e) {}
+}
+function renderLogs() {
+  const q = $("#logfilter").value.toLowerCase(), pre = $("#logs");
+  pre.replaceChildren(...logLines.filter(l => !q || l.text.toLowerCase().includes(q))
+    .map(l => h("div", { class: "l-" + l.level }, l.text)));
+  if ($("#logfollow").checked) pre.scrollTop = pre.scrollHeight;
+}
+$("#logfilter").addEventListener("input", renderLogs);
+$("#logclear").onclick = () => { logLines = []; renderLogs(); };
+
+/* ---------------- loop ---------------- */
+pollStatus();
+setInterval(() => {
+  if (document.visibilityState !== "visible") return;
+  if (tab === "logs") pollLogs(); else pollStatus();
+}, 3000);
+</script>
+</body>
+</html>

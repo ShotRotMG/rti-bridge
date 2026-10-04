@@ -5,7 +5,7 @@ Home Assistant bridge for RTI AV hardware, so it can be driven without the RTI X
 | Device | What it is | Transport | Status |
 |---|---|---|---|
 | **AD-8x** (x2) | 8-zone audio amplifier, 16 zones total | Telnet (port 23) → MQTT discovery | Working |
-| **VHD-8x** | 8x10 HDBaseT video matrix | HTTP API → MQTT discovery | Planned |
+| **VHD-8x** | 8x10 HDBaseT video matrix | HTTP API → MQTT discovery | Planned (v2.1.0) |
 
 Fork of [srhunt-cyber/RTI-AD8x-Home-Assistant-bridge](https://github.com/srhunt-cyber/RTI-AD8x-Home-Assistant-bridge) (MIT),
 with stability fixes: continue-on-zone-failure, poll reconnect, and no credentials in source.
@@ -13,7 +13,7 @@ with stability fixes: continue-on-zone-failure, poll reconnect, and no credentia
 ## Layout
 
 ```
-bridge/                       Python bridge (rti_ad8x_bridge.py, settings.py) + mqtt_test.py
+bridge/                       Python bridge (rti_ad8x_bridge.py, settings.py, web.py, static/) + mqtt_test.py
 config.example.yaml           copy to config/config.yaml
 Dockerfile, docker-compose.yml container build (see Deploy)
 deploy/systemd/               systemd unit, if you run it outside Docker
@@ -55,7 +55,27 @@ Environment variables override the file. Use them to keep the password out of `c
 | `MQTT_HOST`, `MQTT_PORT`, `MQTT_USER`, `MQTT_PASS` | `mqtt.*` (no quotes around values) |
 | `MQTT_BASE`, `DISCOVERY_PREFIX` | `mqtt.base_topic`, `mqtt.discovery_prefix` |
 | `LOG_LEVEL` | `logging.level` (`DEBUG` shows every telnet command) |
+| `WEB_PORT`, `WEB_PASSWORD` | `web.port`, `web.password` |
 | `CONFIG_PATH` | location of config.yaml |
+
+## Web UI
+
+The bridge serves a page on **port 8088**, for example `http://10.0.0.103:8088/`:
+
+- **Status:** each amp's online state and last poll, and every zone with power, mute, source, volume,
+  bass and treble. It uses the same commands as Home Assistant, plus an "All zones off" button.
+- **Config:** a form for MQTT, polling, amps, zones and source labels, or the raw YAML.
+  **Save & apply** validates first, writes `config.yaml` (comments are kept, and the previous file is saved
+  as `config.yaml.bak`), then restarts the bridge. Passwords are never sent to the browser.
+  You can add or remove amps here. Removed amps' entities are cleaned up if `cleanup_orphans` is on.
+- **Logs:** the last 1000 log lines, with a filter.
+
+If `config.yaml` is missing or invalid, the bridge doesn't start but the web UI still does, showing the
+error so you can fix the config from the browser.
+
+The page is open to anyone on the LAN unless you set `web.password` or the `WEB_PASSWORD` env var.
+With a password set, the browser asks for it; any username works. Load is light: the page polls the bridge
+every 3s while open and never talks to the amps directly.
 
 ## Deploy
 

@@ -32,6 +32,12 @@ DEFAULTS = {
         "cleanup_orphans": False,
     },
     "logging": {"level": "INFO"},
+    "web": {
+        "enabled": True,
+        "host": "0.0.0.0",
+        "port": 8088,
+        "password": "",   # optional HTTP Basic auth (any username)
+    },
     "timing": {
         "poll_interval_sec": 20.0,
         "connect_timeout_sec": 6.0,
@@ -56,6 +62,8 @@ ENV_OVERRIDES = {
     "MQTT_BASE": ("mqtt", "base_topic", str),
     "DISCOVERY_PREFIX": ("mqtt", "discovery_prefix", str),
     "LOG_LEVEL": ("logging", "level", str),
+    "WEB_PORT": ("web", "port", int),
+    "WEB_PASSWORD": ("web", "password", str),
 }
 
 _ID_RE = re.compile(r"^[a-z0-9_]+$")
@@ -120,6 +128,7 @@ class Settings:
     discovery: dict
     logging: dict
     timing: dict
+    web: dict
     amps: List[Amp] = field(default_factory=list)
 
     def amp(self, amp_id: str) -> Optional[Amp]:
@@ -134,6 +143,18 @@ def _merge(base: dict, over: dict) -> dict:
         else:
             out[k] = v
     return out
+
+
+def target_config_path() -> str:
+    """Where to write config.yaml: the existing file, else the first sensible location."""
+    try:
+        return find_config_path()
+    except ConfigError:
+        if os.getenv("CONFIG_PATH"):
+            return os.getenv("CONFIG_PATH")
+        if os.path.isdir("/config"):
+            return "/config/config.yaml"
+        return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "config.yaml"))
 
 
 def find_config_path() -> str:
@@ -227,6 +248,13 @@ def parse(raw: dict, path: str = "<memory>", apply_env: bool = True) -> Settings
         cfg["mqtt"]["port"] = int(cfg["mqtt"]["port"])
     except (TypeError, ValueError):
         raise ConfigError("mqtt.port must be a number")
+    try:
+        cfg["web"]["port"] = int(cfg["web"]["port"])
+    except (TypeError, ValueError):
+        raise ConfigError("web.port must be a number")
+    if not 1 <= cfg["web"]["port"] <= 65535:
+        raise ConfigError("web.port must be 1-65535")
+    cfg["web"]["enabled"] = bool(cfg["web"]["enabled"])
     for k in ("base_topic", "discovery_prefix"):
         t = str(cfg["mqtt"][k]).strip("/")
         if not t or any(c in t for c in "+#"):
@@ -257,7 +285,7 @@ def parse(raw: dict, path: str = "<memory>", apply_env: bool = True) -> Settings
 
     return Settings(
         path=path, raw=raw, mqtt=cfg["mqtt"], discovery=cfg["discovery"],
-        logging=cfg["logging"], timing=cfg["timing"], amps=amps,
+        logging=cfg["logging"], timing=cfg["timing"], web=cfg["web"], amps=amps,
     )
 
 
