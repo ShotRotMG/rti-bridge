@@ -281,7 +281,7 @@ function renderStatus(s) {
       h("div", { class: "amp-head" },
         h("h2", {}, amp.name),
         h("span", { class: "chip " + (amp.connected ? "ok" : "bad") }, amp.connected ? "online" : "offline"),
-        h("span", { class: "meta" }, `${amp.id} · ${amp.host}:${amp.port} · ${last}${amp.failures ? ` · ${amp.failures} failed polls` : ""}`)),
+        h("span", { class: "meta" }, `${amp.id} · ${amp.host}:${amp.port} · ${last}${amp.failures ? ` · ${amp.failures} failed polls` : ""}${amp.rejects_recovered || amp.rejects_failed ? ` · amp said "#?" ${amp.rejects_recovered + amp.rejects_failed}× (${amp.rejects_recovered} recovered by retry)` : ""}`)),
       h("div", { class: "zones" }));
     if (amp.reset && amp.reset.suspected) sec.insertBefore(resetBanner(amp), $(".zones", sec));
     const grid = $(".zones", sec);

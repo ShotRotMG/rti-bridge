@@ -25,7 +25,7 @@ STATUS_TEXT = {0: "ok", 1: "fault", 2: "warning", 3: "no signal", 4: "not presen
 
 
 class VHD8xHTTP:
-    def __init__(self, host: str, port: int = 80, timeout: float = 3.0):
+    def __init__(self, host: str, port: int = 80, timeout: float = 5.0):
         self.base = f"http://{host}" + ("" if port == 80 else f":{port}")
         self.timeout = timeout
 

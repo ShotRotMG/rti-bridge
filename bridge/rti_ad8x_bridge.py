@@ -17,6 +17,8 @@ Version 1.8.2
          exponential reconnect backoff, staggered amp start, 0.2s command pacing
   2.1.2: advanced timing section in the web config form
   2.1.3: factory-reset detection (warn only): HA sensor + dismiss button, web banner
+  2.1.4: retry queries the amp rejects with "#?" (flush, wait, resend) instead of
+         waiting out the timeout; matrix HTTP timeout 5s
 """
 import os
 import sys
@@ -67,7 +69,7 @@ class _RingHandler(logging.Handler):
 LOG_BUFFER = _RingHandler()
 LOG_BUFFER.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
 logging.getLogger().addHandler(LOG_BUFFER)
-__version__ = "2.1.3"
+__version__ = "2.1.4"
 
 
 # CONFIG - populated from config.yaml by apply_settings() at startup
@@ -90,7 +92,9 @@ TONE_SETTLE_SEC = 6.0
 RECONNECT_BACKOFF_INITIAL = 5.0
 RECONNECT_BACKOFF_MAX = 30.0
 AMP_START_STAGGER = 1.5
-ORPHAN_SCAN_SEC = 5.0  # how long to collect retained discovery configs before cleanup
+ORPHAN_SCAN_SEC = 5.0
+REJECT_RETRIES = 2         # extra attempts when the amp answers a query with "#?"
+REJECT_RETRY_SLEEP = 0.3  # how long to collect retained discovery configs before cleanup
 
 
 def apply_settings(cfg: Settings):
@@ -210,6 +214,8 @@ class AmpSession(threading.Thread):
         self._consecutive_failures = 0
         self._is_down_published = False
         self.last_poll_ok: Optional[float] = None
+        self.rejects_recovered = 0   # "#?" rejections that succeeded on retry
+        self.rejects_failed = 0      # queries rejected on every attempt
 
     def _cleanup_socket(self):
         try:
@@ -298,6 +304,63 @@ class AmpSession(threading.Thread):
                 continue
             if line.startswith(expected_prefix):
                 return line
+        return ""
+
+    def _read_reply_ex(self, expected_prefix: str, timeout_s: float) -> Tuple[str, bool]:
+        """Like _read_reply, but stops at a "#?" rejection. Returns (line, rejected)."""
+        end = time.time() + timeout_s
+        while time.time() < end:
+            line = self._readline(max(0.05, end - time.time()))
+            if not line:
+                continue
+            if line == "#?":
+                return "", True
+            if line.startswith(expected_prefix):
+                return line, False
+        return "", False
+
+    def _drain(self):
+        """Throw away anything queued (e.g. a burst of "#?") before resending."""
+        self._rbuf = b""
+        s = self.sock
+        if not s:
+            return
+        try:
+            s.settimeout(0.05)
+            while True:
+                chunk = s.recv(1024)
+                if not chunk:
+                    break
+                if DUMP_RAW_CHUNKS and log.isEnabledFor(logging.DEBUG):
+                    log.debug(f"[{self.amp_name}] DRAINED {len(chunk)}B: {chunk.hex(' ')}")
+        except (socket.timeout, BlockingIOError):
+            pass
+        finally:
+            if self.sock:
+                self.sock.settimeout(PER_CMD_TIMEOUT)
+
+    def _query(self, cmd_ascii: str, expected_prefix: str, settle: float) -> str:
+        """Send a status query and return the matching reply line. The AD-8x sometimes
+        answers a valid query with "#?"; then flush, wait briefly and ask again."""
+        for attempt in range(REJECT_RETRIES + 1):
+            self._send_ascii(cmd_ascii)
+            time.sleep(settle)
+            line, rejected = self._read_reply_ex(expected_prefix, PER_CMD_TIMEOUT)
+            if line:
+                if attempt:
+                    self.rejects_recovered += 1
+                    log.debug(f"[{self.amp_name}] {cmd_ascii} ok after {attempt} retr{'y' if attempt == 1 else 'ies'}")
+                return line
+            if not rejected:
+                return ""  # plain timeout: don't stack more 5s waits
+            if attempt == REJECT_RETRIES:
+                break
+            log.debug(f"[{self.amp_name}] {cmd_ascii} rejected (#?) - retry {attempt + 1}/{REJECT_RETRIES}")
+            self._drain()
+            time.sleep(REJECT_RETRY_SLEEP)
+        log.debug(f"[{self.amp_name}] {cmd_ascii} rejected (#?) on all {REJECT_RETRIES + 1} attempts")
+        self._drain()
+        self.rejects_failed += 1
         return ""
 
     def _send_ascii(self, cmd_ascii: str):
@@ -510,9 +573,7 @@ class AmpSession(threading.Thread):
         with self.lock:
             if self.connected or self._connect():
                 try:
-                    self._send_ascii(f"*ZN{zz(zone)}SET00")
-                    time.sleep(POST_SEND_SETTLE)
-                    tone = parse_tone(self._read_reply(f"${zz(zone)},", PER_CMD_TIMEOUT))
+                    tone = parse_tone(self._query(f"*ZN{zz(zone)}SET00", f"${zz(zone)},", POST_SEND_SETTLE))
                 except Exception as e:
                     log.warning(f"[{self.amp_name}] {field} verify failed for zone {zone}: {e}")
         if buf.get(f"{field}_seq") != seq:
@@ -536,12 +597,8 @@ class AmpSession(threading.Thread):
                 try:
                     self._send_ascii(cmd_ascii)
                     time.sleep(POST_SEND_SETTLE)
-                    self._send_ascii(f"*ZN{zz(zone)}STA00")
-                    time.sleep(POST_SEND_SETTLE)
-                    sta_line = self._read_reply(f"#{zz(zone)},", PER_CMD_TIMEOUT)
-                    self._send_ascii(f"*ZN{zz(zone)}SET00")
-                    time.sleep(POST_SEND_SETTLE)
-                    tone_line = self._read_reply(f"${zz(zone)},", PER_CMD_TIMEOUT)
+                    sta_line = self._query(f"*ZN{zz(zone)}STA00", f"#{zz(zone)},", POST_SEND_SETTLE)
+                    tone_line = self._query(f"*ZN{zz(zone)}SET00", f"${zz(zone)},", POST_SEND_SETTLE)
                     sta_data, tone_data = parse_sta(sta_line), parse_tone(tone_line)
                     if sta_data and tone_data:
                         self._pub_zone_full(zone, sta_data, tone_data)
@@ -583,12 +640,8 @@ class AmpSession(threading.Thread):
                     if self.stop_flag.is_set():
                         return False
                     try:
-                        self._send_ascii(f"*ZN{zz(z)}STA00")
-                        time.sleep(INTER_CMD_SLEEP)
-                        sta_line = self._read_reply(f"#{zz(z)},", PER_CMD_TIMEOUT)
-                        self._send_ascii(f"*ZN{zz(z)}SET00")
-                        time.sleep(INTER_CMD_SLEEP)
-                        tone_line = self._read_reply(f"${zz(z)},", PER_CMD_TIMEOUT)
+                        sta_line = self._query(f"*ZN{zz(z)}STA00", f"#{zz(z)},", INTER_CMD_SLEEP)
+                        tone_line = self._query(f"*ZN{zz(z)}SET00", f"${zz(z)},", INTER_CMD_SLEEP)
                         sta_data, tone_data = parse_sta(sta_line), parse_tone(tone_line)
                         if sta_data and tone_data:
                             self._pub_zone_full(z, sta_data, tone_data)
@@ -1056,6 +1109,8 @@ class Bridge:
                 "id": amp.id, "name": amp.device_name, "host": amp.host, "port": amp.port,
                 "connected": bool(sess and sess.connected),
                 "failures": sess._consecutive_failures if sess else 0,
+                "rejects_recovered": sess.rejects_recovered if sess else 0,
+                "rejects_failed": sess.rejects_failed if sess else 0,
                 "last_poll_ok": sess.last_poll_ok if sess else None,
                 "source_options": amp.source_options,
                 "reset": self.reset.get(amp.id),
