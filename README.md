@@ -70,11 +70,20 @@ Home Assistant gets one device per matrix, with:
 - a **link** binary sensor per listed output (the HDBaseT link to the display or receiver is up;
   this doesn't mean there's picture)
 
+With `cec_power: true` (or the checkbox on the Config page) each listed output also gets a **power switch**.
+It works over HDMI-CEC (`/CEC/on|off/Output/{bay}`), and its state is the display's own power report (`DPS`:
+0 on, 1 standby, 2/3 switching), read every 15s. If a display hasn't confirmed after 15s, the command is sent
+once more, then a warning is logged. `cec_volume: true` adds volume up/down buttons (CEC). Both need
+**HDMI-CEC Support** turned on in the matrix's Routing Control page and Anynet+/HDMI Control on the display.
+The matrix also gets **Matrix Status**, **Matrix Problem** and **Matrix Firmware** diagnostic entities from
+`/System/Details`.
+
 Input labels come from `inputs:` in the config, or else the names set on the matrix itself.
 The web UI's Status tab shows a click-to-route grid of all 10 outputs.
 
-MQTT: state is under `rti/vhd8x/<id>/output/<n>/{source,source_number,link}`, `.../input/<n>/signal`
+MQTT: state is under `rti/vhd8x/<id>/output/<n>/{source,source_number,link,power}`, `.../input/<n>/signal`
 and `.../status`. To route, publish an input label or number to `rti/vhd8x/<id>/output/<n>/set/source`.
+Power: `.../set/power` with `on`/`off`. Volume: `.../set/volume` with `up`/`down`.
 
 Firmware tested: 3.5.43-1 (HDBaseT modules 31.47.1). The matrix connects to the RTI/Pulse-Eight cloud
 and can update itself. If routing stops working after an update, check `/Port/List` still answers.

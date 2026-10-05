@@ -19,6 +19,8 @@ Version 1.8.2
   2.1.3: factory-reset detection (warn only): HA sensor + dismiss button, web banner
   2.1.4: retry queries the amp rejects with "#?" (flush, wait, resend) instead of
          waiting out the timeout; matrix HTTP timeout 5s
+  2.2.0: VHD-8x display power switches via HDMI-CEC (state from DPS), optional CEC
+         volume buttons, matrix health sensors
 """
 import os
 import sys
@@ -69,7 +71,7 @@ class _RingHandler(logging.Handler):
 LOG_BUFFER = _RingHandler()
 LOG_BUFFER.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
 logging.getLogger().addHandler(LOG_BUFFER)
-__version__ = "2.1.4"
+__version__ = "2.2.0"
 
 
 # CONFIG - populated from config.yaml by apply_settings() at startup
@@ -761,6 +763,36 @@ class Bridge:
                     "stat_t": sess.topic("output", n, "link"), "pl_on": "on", "pl_off": "off",
                     "dev_cla": "connectivity", "ent_cat": "diagnostic", "avty_t": avail, "device": dev,
                 })
+                if m.cec_power:
+                    self._pub_disc("switch", f"{oid}_power", {
+                        "name": f"{out.name} Power", "uniq_id": f"{oid}_power",
+                        "stat_t": sess.topic("output", n, "power"),
+                        "cmd_t": sess.topic("output", n, "set", "power"),
+                        "pl_on": "on", "pl_off": "off", "stat_on": "on", "stat_off": "off",
+                        "icon": "mdi:television", "avty_t": avail, "device": dev,
+                    })
+                if m.cec_volume:
+                    for d in ("up", "down"):
+                        self._pub_disc("button", f"{oid}_volume_{d}", {
+                            "name": f"{out.name} Volume {d.title()}", "uniq_id": f"{oid}_volume_{d}",
+                            "cmd_t": sess.topic("output", n, "set", "volume"), "pl_prs": d,
+                            "icon": f"mdi:volume-{'plus' if d == 'up' else 'minus'}",
+                            "avty_t": avail, "device": dev,
+                        })
+            hid = slugify(f"vhd8x_{m.id}_health")
+            self._pub_disc("sensor", f"{hid}_status", {
+                "name": "Matrix Status", "uniq_id": f"{hid}_status", "stat_t": sess.topic("health"),
+                "ent_cat": "diagnostic", "icon": "mdi:heart-pulse", "avty_t": avail, "device": dev,
+            })
+            self._pub_disc("binary_sensor", f"{hid}_problem", {
+                "name": "Matrix Problem", "uniq_id": f"{hid}_problem", "stat_t": sess.topic("health", "problem"),
+                "pl_on": "on", "pl_off": "off", "dev_cla": "problem", "ent_cat": "diagnostic",
+                "avty_t": avail, "device": dev,
+            })
+            self._pub_disc("sensor", f"{hid}_firmware", {
+                "name": "Matrix Firmware", "uniq_id": f"{hid}_firmware", "stat_t": sess.topic("health", "version"),
+                "ent_cat": "diagnostic", "icon": "mdi:chip", "device": dev,
+            })
             for n in range(1, settings_mod.MATRIX_INPUTS + 1):
                 iid = slugify(f"vhd8x_{m.id}_input_{n}")
                 self._pub_disc("binary_sensor", f"{iid}_signal", {
@@ -998,7 +1030,7 @@ class Bridge:
                 self._pub_reset(amp.id, self.reset.get(amp.id))
             client.subscribe(f"{DISCOVERY_PREFIX}/status")
             if SETTINGS.matrices:
-                client.subscribe(f"{MATRIX_BASE}/+/output/+/set/source")
+                client.subscribe(f"{MATRIX_BASE}/+/output/+/set/+")
             client.publish(self._topic("bridge", "status"), "online", retain=True)
             self.publish_discovery()
             for sess in self.matrices.values():
@@ -1090,6 +1122,18 @@ class Bridge:
         sess = self.matrices.get(matrix_id)
         return bool(sess and sess.route(int(output_n), str(input_value)))
 
+    def matrix_power(self, matrix_id: str, output_n: int, on: bool) -> bool:
+        sess = self.matrices.get(matrix_id)
+        if not sess or not sess.cfg.cec_power:
+            return False
+        return sess.set_power(int(output_n), bool(on))
+
+    def matrix_volume(self, matrix_id: str, output_n: int, up: bool) -> bool:
+        sess = self.matrices.get(matrix_id)
+        if not sess or not sess.cfg.cec_volume:
+            return False
+        return sess.volume(int(output_n), bool(up))
+
     def snapshot(self) -> dict:
         """Current state for the web UI."""
         amps = []
@@ -1143,10 +1187,18 @@ class Bridge:
             if topic.startswith(MATRIX_BASE + "/"):
                 parts = topic[len(MATRIX_BASE) + 1:].split("/")
                 # <matrix>/output/<n>/set/source
-                if len(parts) == 5 and parts[1] == "output" and parts[3:] == ["set", "source"]:
-                    log.info(f"[{parts[0]}] output {parts[2]} source <- '{payload}'")
-                    threading.Thread(target=self.matrix_route, args=(parts[0], int(parts[2]), payload),
-                                     daemon=True).start()
+                if len(parts) == 5 and parts[1] == "output" and parts[3] == "set" and parts[2].isdigit():
+                    mid, n, cmd = parts[0], int(parts[2]), parts[4]
+                    log.info(f"[{mid}] output {n} {cmd} <- '{payload}'")
+                    if cmd == "source":
+                        target, args = self.matrix_route, (mid, n, payload)
+                    elif cmd == "power":
+                        target, args = self.matrix_power, (mid, n, payload.lower() in ("on", "1", "true"))
+                    elif cmd == "volume":
+                        target, args = self.matrix_volume, (mid, n, payload.lower() in ("up", "+", "1"))
+                    else:
+                        return
+                    threading.Thread(target=target, args=args, daemon=True).start()
                 return
 
             if not topic.startswith(MQTT_BASE + "/"):

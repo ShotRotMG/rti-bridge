@@ -160,6 +160,7 @@ def form_get(path: str) -> dict:
         "matrices": [{
             "id": m.id, "name": m.name, "host": m.host, "port": m.port,
             "poll_interval_sec": m.poll_interval_sec,
+            "cec_power": m.cec_power, "cec_volume": m.cec_volume,
             "inputs": {str(n): m.inputs.get(n, "") for n in range(1, MATRIX_INPUTS + 1)},
             "outputs": {str(n): {"exposed": n in m.outputs,
                                  "name": m.outputs[n].name if n in m.outputs else f"Output {n}",
@@ -293,6 +294,11 @@ def form_save(path: str, data: dict) -> None:
                 _set_or_insert(m, 3, "port", port)
             v = float(d.get("poll_interval_sec") or 5)
             _set_or_insert(m, 4, "poll_interval_sec", int(v) if v.is_integer() else v)
+            for k in ("cec_power", "cec_volume"):
+                if d.get(k):
+                    _set_or_insert(m, 5, k, True)
+                elif k in m:
+                    del m[k]
 
             inputs = CommentedMap()
             for n in range(1, MATRIX_INPUTS + 1):
@@ -301,7 +307,7 @@ def form_save(path: str, data: dict) -> None:
                     inputs[n] = label
             if not inputs:
                 inputs.fa.set_flow_style()
-            _set_or_insert(m, 5, "inputs", inputs)
+            _set_or_insert(m, 7, "inputs", inputs)
 
             outputs = CommentedMap()
             for n in range(1, MATRIX_OUTPUTS + 1):
@@ -315,7 +321,7 @@ def form_save(path: str, data: dict) -> None:
                 outputs[n] = entry
             if not outputs:
                 outputs.fa.set_flow_style()
-            _set_or_insert(m, 6, "outputs", outputs)
+            _set_or_insert(m, 8, "outputs", outputs)
             seq.append(m)
         doc["matrices"] = seq
 
@@ -432,6 +438,17 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._send(503, {"ok": False, "error": "bridge not running"})
                 log.info(f"[web] {body.get('matrix')} output {body.get('output')} <- input {body.get('input')}")
                 ok = self.bridge.matrix_route(str(body.get("matrix")), int(body.get("output")), str(body.get("input")))
+                return self._send(200, {"ok": ok})
+            if path in ("/api/matrix_power", "/api/matrix_volume"):
+                if self.bridge is None:
+                    return self._send(503, {"ok": False, "error": "bridge not running"})
+                mid, n = str(body.get("matrix")), int(body.get("output"))
+                if path == "/api/matrix_power":
+                    log.info(f"[web] {mid} output {n} power <- {'on' if body.get('on') else 'off'}")
+                    ok = self.bridge.matrix_power(mid, n, bool(body.get("on")))
+                else:
+                    log.info(f"[web] {mid} output {n} volume <- {'up' if body.get('up') else 'down'}")
+                    ok = self.bridge.matrix_volume(mid, n, bool(body.get("up")))
                 return self._send(200, {"ok": ok})
             if path == "/api/reset_ack":
                 if self.bridge is None:

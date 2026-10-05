@@ -72,7 +72,7 @@ main { max-width: 1280px; margin: 0 auto; padding: 16px; }
 .mx-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
 table.mx { border-collapse: separate; border-spacing: 0; min-width: 640px; }
 table.mx th, table.mx td { border-bottom: 1px solid var(--line); padding: 6px; text-align: center; }
-table.mx th.out, table.mx td.out { text-align: left; white-space: nowrap; position: sticky; left: 0; background: var(--panel); }
+table.mx th.out, table.mx td.out { width: 1%; text-align: left; white-space: nowrap; position: sticky; left: 0; background: var(--panel); }
 table.mx thead th { font-size: 12px; color: var(--text); font-weight: 500; vertical-align: bottom; }
 table.mx thead th small, table.mx td.out small { display: block; color: var(--muted); font-weight: 400; font-size: 11px; }
 table.mx tr.hidden-out td { opacity: .55; }
@@ -183,7 +183,7 @@ function h(tag, attrs = {}, ...kids) {
     else if (k === "value") el.value = v;
     else el.setAttribute(k, v === true ? "" : v);
   }
-  for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) el.append(k.nodeType ? k : String(k));
+  for (const k of kids.flat(Infinity)) if (k !== null && k !== undefined && k !== false) el.append(k.nodeType ? k : String(k));
   return el;
 }
 async function api(path, body) {
@@ -323,13 +323,27 @@ function renderMatrices(list) {
   const wrap = $("#matrices");
   wrap.replaceChildren(...list.map(m => {
     const last = m.last_poll_ok ? `last poll ${fmtDur(Date.now()/1000 - m.last_poll_ok)} ago` : "no successful poll yet";
+    const pw = !!m.cec_power, vol = !!m.cec_volume;
     const head = h("tr", {}, h("th", { class: "out" }, "Output \\ Input"),
+      pw || vol ? h("th", {}, "Display") : null,
       m.inputs.map(i => h("th", { title: `${i.status_text}${i.device_name ? " · matrix name: " + i.device_name : ""}` },
         h("span", { class: "dot" + (i.status === 0 || i.status === 2 ? " on" : "") }), i.n, h("small", {}, i.label))));
     const rows = m.outputs.map(o => h("tr", { class: o.exposed ? "" : "hidden-out" },
       h("td", { class: "out", title: o.device_name ? `display reports: ${o.device_name}` : "" },
         h("span", { class: "dot" + (o.status === 0 || o.status === 2 ? " on" : "") }), `${o.n} · ${o.name}`,
         h("small", {}, o.exposed ? (o.device_name || "") : "not in Home Assistant")),
+      pw || vol ? h("td", { style: "white-space:nowrap" }, o.exposed ? [
+        pw ? h("button", { class: "toggle" + (o.power ? " on" : ""), title: `DPS ${o.dps ?? "?"}`,
+          onclick: async () => {
+            try { const r = await api("/api/matrix_power", { matrix: m.id, output: o.n, on: !o.power });
+              if (!r.ok) flash(`Matrix rejected power for ${o.name}`, "bad"); } catch (e) { flash("Power failed: " + e.message, "bad"); }
+            setTimeout(pollStatus, 500);
+          } }, o.power === null || o.power === undefined ? "?" : (o.power ? "On" : "Off")) : null,
+        vol ? [" ", h("button", { class: "cell", style: "width:28px", title: "Volume down",
+            onclick: () => api("/api/matrix_volume", { matrix: m.id, output: o.n, up: false }) }, "−"),
+          h("button", { class: "cell", style: "width:28px", title: "Volume up",
+            onclick: () => api("/api/matrix_volume", { matrix: m.id, output: o.n, up: true }) }, "+")] : null,
+      ] : "") : null,
       m.inputs.map(i => h("td", {}, h("button", {
         class: "cell" + (o.source === i.n ? " sel" : ""), title: `${i.label} → ${o.name}`,
         "aria-label": `Route ${i.label} to ${o.name}`,
@@ -342,7 +356,8 @@ function renderMatrices(list) {
     return h("section", { class: "amp" },
       h("div", { class: "amp-head" }, h("h2", {}, m.name),
         h("span", { class: "chip " + (m.connected ? "ok" : "bad") }, m.connected ? "online" : "offline"),
-        h("span", { class: "meta" }, `${m.id} · ${m.host} · every ${m.poll_interval_sec}s · ${last}${m.failures ? ` · ${m.failures} failed polls` : ""}`)),
+        m.health && m.health.message ? h("span", { class: "chip " + (m.health.status === 0 ? "ok" : "bad") }, m.health.message) : null,
+        h("span", { class: "meta" }, `${m.id} · ${m.host} · every ${m.poll_interval_sec}s · ${last}${m.failures ? ` · ${m.failures} failed polls` : ""}${m.health && m.health.version ? ` · fw ${m.health.version}` : ""}`)),
       h("div", { class: "mx-wrap" }, h("table", { class: "mx" }, h("thead", {}, head), h("tbody", {}, rows))),
       h("div", { class: "legend" }, "Green dot on an input = signal present. Green dot on an output = HDBaseT link up (display/receiver connected), not picture."));
   }));
@@ -566,7 +581,15 @@ function matrixCard(m, i) {
       field("Display name", mName),
       field("Host / IP", inp(m, "host", { placeholder: "192.168.1.x" })),
       field("HTTP port", inp(m, "port", { type: "number" })),
-      field("Poll interval (s)", inp(m, "poll_interval_sec", { type: "number", min: 1, step: 1 }))),
+      field("Poll interval (s)", inp(m, "poll_interval_sec", { type: "number", min: 1, step: 1 })),
+      h("label", { class: "field check" }, h("input", { type: "checkbox", checked: !!m.cec_power,
+        onchange: e => { m.cec_power = e.target.checked; markDirty(); } }),
+        h("span", {}, "Display power switches (HDMI-CEC)")),
+      h("label", { class: "field check" }, h("input", { type: "checkbox", checked: !!m.cec_volume,
+        onchange: e => { m.cec_volume = e.target.checked; markDirty(); } }),
+        h("span", {}, "Volume buttons (HDMI-CEC)"))),
+    m.cec_power || m.cec_volume ? h("div", { class: "hint", style: "margin-top:6px" },
+      "Needs HDMI-CEC Support on in the matrix (Routing Control) and Anynet+/HDMI Control on each display.") : null,
     h("div", { class: "two" }, outputs, inputs),
     h("div", { class: "hint", style: "margin-top:8px" }, "Only ticked outputs get Home Assistant entities. If none are ticked, all 10 do."));
 }

@@ -151,6 +151,9 @@ class Matrix:
     inputs: Dict[int, str]         # configured labels only; see input_labels()
     outputs: Dict[int, Output]     # outputs exposed to HA (all 10 if none configured)
     name: str = ""
+    cec_power: bool = False        # power switch per output via HDMI-CEC (matrix CEC must be on)
+    cec_volume: bool = False       # volume up/down buttons per output via HDMI-CEC
+    power_poll_sec: float = 15.0   # how often display power state (DPS) is read
 
     @property
     def device_name(self) -> str:
@@ -341,7 +344,14 @@ def _parse_matrices(raw, amp_ids) -> List[Matrix]:
                 raise ConfigError(f"matrices.{mid}: outputs {seen_ids[oid]} and {n} share id '{oid}'")
             seen_ids[oid] = n
             outputs[n] = Output(n, name, oid)
-        out.append(Matrix(mid, host, port, poll, inputs, outputs, str(m.get("name") or "").strip()))
+        try:
+            ppoll = float(m.get("power_poll_sec", 15))
+        except (TypeError, ValueError):
+            raise ConfigError(f"matrices.{mid}.power_poll_sec must be a number")
+        if ppoll < 5:
+            raise ConfigError(f"matrices.{mid}.power_poll_sec must be at least 5")
+        out.append(Matrix(mid, host, port, poll, inputs, outputs, str(m.get("name") or "").strip(),
+                          bool(m.get("cec_power", False)), bool(m.get("cec_volume", False)), ppoll))
     return out
 
 
